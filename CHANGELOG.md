@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1] - 2026-02-14
+
+### Changed
+
+- Bump kura dependency to `~> 0.4`
+- Remove dialyzer nowarn on `types_equal/2` (enum type now in kura PLT)
+
 ## [0.4.0] - 2026-02-14
 
 ### Added
