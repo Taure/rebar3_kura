@@ -20,15 +20,17 @@ init(State) ->
         {example, "rebar3 kura compile"},
         {opts, []},
         {short_desc, "Auto-generate Kura migrations from schema changes"},
-        {desc, "Diffs kura_schema modules against existing migrations and generates new migration files."}
+        {desc,
+            "Diffs kura_schema modules against existing migrations and generates new migration files."}
     ]),
     {ok, rebar_state:add_provider(State, Provider)}.
 
 do(State) ->
-    Apps = case rebar_state:current_app(State) of
-        undefined -> rebar_state:project_apps(State);
-        AppInfo -> [AppInfo]
-    end,
+    Apps =
+        case rebar_state:current_app(State) of
+            undefined -> rebar_state:project_apps(State);
+            AppInfo -> [AppInfo]
+        end,
     ensure_kura_on_path(State),
     lists:foreach(fun(AppInfo) -> process_app(AppInfo) end, Apps),
     {ok, State}.
@@ -85,9 +87,12 @@ process_app(AppInfo) ->
 
 find_schema_files(SrcDir, MigDir) ->
     AllErl = filelib:wildcard(filename:join([SrcDir, "**", "*.erl"])),
-    [F || F <- AllErl,
-          not lists:prefix(MigDir, F),
-          is_schema_file(F)].
+    [
+        F
+     || F <- AllErl,
+        not lists:prefix(MigDir, F),
+        is_schema_file(F)
+    ].
 
 is_schema_file(File) ->
     {ok, Bin} = file:read_file(File),
@@ -103,9 +108,12 @@ find_migration_files(MigDir) ->
 
 compile_opts(AppInfo) ->
     AppDir = rebar_app_info:dir(AppInfo),
-    [binary, return_errors,
-     {i, filename:join(AppDir, "include")},
-     {i, filename:join(AppDir, "src")}].
+    [
+        binary,
+        return_errors,
+        {i, filename:join(AppDir, "include")},
+        {i, filename:join(AppDir, "src")}
+    ].
 
 compile_all(SchemaFiles, MigFiles, Opts) ->
     SchemaMods = [compile_and_load(F, Opts) || F <- SchemaFiles],
@@ -125,10 +133,13 @@ compile_and_load(File, Opts) ->
     end.
 
 cleanup(Modules) ->
-    lists:foreach(fun(Mod) ->
-        code:purge(Mod),
-        code:delete(Mod)
-    end, Modules).
+    lists:foreach(
+        fun(Mod) ->
+            code:purge(Mod),
+            code:delete(Mod)
+        end,
+        Modules
+    ).
 
 %%====================================================================
 %% Migration generation
@@ -146,18 +157,27 @@ generate_migration(MigDir, UpOps, DownOps) ->
 
 make_timestamp(MigDir) ->
     {{Y, Mo, D}, {H, Mi, S}} = calendar:universal_time(),
-    Ts = lists:flatten(io_lib:format("~4..0B~2..0B~2..0B~2..0B~2..0B~2..0B",
-                                     [Y, Mo, D, H, Mi, S])),
+    Ts = lists:flatten(
+        io_lib:format(
+            "~4..0B~2..0B~2..0B~2..0B~2..0B~2..0B",
+            [Y, Mo, D, H, Mi, S]
+        )
+    ),
     %% Check for collision
     Pattern = filename:join(MigDir, "m" ++ Ts ++ "_*.erl"),
     case filelib:wildcard(Pattern) of
-        [] -> Ts;
+        [] ->
+            Ts;
         _ ->
             %% Bump by 1 second
             Secs = calendar:datetime_to_gregorian_seconds({{Y, Mo, D}, {H, Mi, S}}) + 1,
             {{Y2, Mo2, D2}, {H2, Mi2, S2}} = calendar:gregorian_seconds_to_datetime(Secs),
-            lists:flatten(io_lib:format("~4..0B~2..0B~2..0B~2..0B~2..0B~2..0B",
-                                        [Y2, Mo2, D2, H2, Mi2, S2]))
+            lists:flatten(
+                io_lib:format(
+                    "~4..0B~2..0B~2..0B~2..0B~2..0B~2..0B",
+                    [Y2, Mo2, D2, H2, Mi2, S2]
+                )
+            )
     end.
 
 derive_description(Ops) ->
@@ -211,16 +231,19 @@ render_alter_op({rename_column, Old, New}) ->
 
 render_column(#kura_column{name = N, type = T, nullable = Null, default = Def, primary_key = PK}) ->
     Parts = [io_lib:format("name = ~p", [N]), io_lib:format("type = ~p", [T])],
-    Parts2 = case PK of
-        true -> Parts ++ ["primary_key = true"];
-        false -> Parts
-    end,
-    Parts3 = case Null of
-        false -> Parts2 ++ ["nullable = false"];
-        true -> Parts2
-    end,
-    Parts4 = case Def of
-        undefined -> Parts3;
-        _ -> Parts3 ++ [io_lib:format("default = ~p", [Def])]
-    end,
+    Parts2 =
+        case PK of
+            true -> Parts ++ ["primary_key = true"];
+            false -> Parts
+        end,
+    Parts3 =
+        case Null of
+            false -> Parts2 ++ ["nullable = false"];
+            true -> Parts2
+        end,
+    Parts4 =
+        case Def of
+            undefined -> Parts3;
+            _ -> Parts3 ++ [io_lib:format("default = ~p", [Def])]
+        end,
     io_lib:format("#kura_column{~s}", [lists:join(", ", Parts4)]).

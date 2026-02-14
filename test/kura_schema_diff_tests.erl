@@ -13,10 +13,12 @@ build_db_state_empty_test() ->
 build_db_state_create_table_test() ->
     meck:new(m_create, [non_strict]),
     meck:expect(m_create, up, fun() ->
-        [{create_table, <<"pets">>, [
-            #kura_column{name = id, type = id, primary_key = true},
-            #kura_column{name = name, type = string}
-        ]}]
+        [
+            {create_table, <<"pets">>, [
+                #kura_column{name = id, type = id, primary_key = true},
+                #kura_column{name = name, type = string}
+            ]}
+        ]
     end),
     State = kura_schema_diff:build_db_state([m_create]),
     ?assert(maps:is_key(<<"pets">>, State)),
@@ -27,14 +29,18 @@ build_db_state_alter_table_test() ->
     meck:new(m_a_create, [non_strict]),
     meck:new(m_b_alter, [non_strict]),
     meck:expect(m_a_create, up, fun() ->
-        [{create_table, <<"pets">>, [
-            #kura_column{name = id, type = id}
-        ]}]
+        [
+            {create_table, <<"pets">>, [
+                #kura_column{name = id, type = id}
+            ]}
+        ]
     end),
     meck:expect(m_b_alter, up, fun() ->
-        [{alter_table, <<"pets">>, [
-            {add_column, #kura_column{name = age, type = integer}}
-        ]}]
+        [
+            {alter_table, <<"pets">>, [
+                {add_column, #kura_column{name = age, type = integer}}
+            ]}
+        ]
     end),
     State = kura_schema_diff:build_db_state([m_a_create, m_b_alter]),
     Cols = maps:get(<<"pets">>, State),
@@ -60,10 +66,12 @@ build_db_state_drop_column_test() ->
     meck:new(m_create4, [non_strict]),
     meck:new(m_dropcol, [non_strict]),
     meck:expect(m_create4, up, fun() ->
-        [{create_table, <<"t">>, [
-            #kura_column{name = id, type = id},
-            #kura_column{name = old, type = string}
-        ]}]
+        [
+            {create_table, <<"t">>, [
+                #kura_column{name = id, type = id},
+                #kura_column{name = old, type = string}
+            ]}
+        ]
     end),
     meck:expect(m_dropcol, up, fun() ->
         [{alter_table, <<"t">>, [{drop_column, old}]}]
@@ -77,9 +85,11 @@ build_db_state_drop_column_test() ->
 build_db_state_skips_index_ops_test() ->
     meck:new(m_idx, [non_strict]),
     meck:expect(m_idx, up, fun() ->
-        [{create_table, <<"t">>, [#kura_column{name = id, type = id}]},
-         {create_index, <<"idx_t_id">>, <<"t">>, [id], []},
-         {execute, <<"SELECT 1">>}]
+        [
+            {create_table, <<"t">>, [#kura_column{name = id, type = id}]},
+            {create_index, <<"idx_t_id">>, <<"t">>, [id], []},
+            {execute, <<"SELECT 1">>}
+        ]
     end),
     State = kura_schema_diff:build_db_state([m_idx]),
     ?assertEqual(1, length(maps:get(<<"t">>, State))),
@@ -89,10 +99,12 @@ build_db_state_rename_column_test() ->
     meck:new(m_rc_create, [non_strict]),
     meck:new(m_rc_rename, [non_strict]),
     meck:expect(m_rc_create, up, fun() ->
-        [{create_table, <<"t">>, [
-            #kura_column{name = id, type = id},
-            #kura_column{name = old_name, type = string}
-        ]}]
+        [
+            {create_table, <<"t">>, [
+                #kura_column{name = id, type = id},
+                #kura_column{name = old_name, type = string}
+            ]}
+        ]
     end),
     meck:expect(m_rc_rename, up, fun() ->
         [{alter_table, <<"t">>, [{rename_column, old_name, new_name}]}]
@@ -108,10 +120,12 @@ build_db_state_modify_column_test() ->
     meck:new(m_mc_create, [non_strict]),
     meck:new(m_mc_modify, [non_strict]),
     meck:expect(m_mc_create, up, fun() ->
-        [{create_table, <<"t">>, [
-            #kura_column{name = id, type = id},
-            #kura_column{name = age, type = integer}
-        ]}]
+        [
+            {create_table, <<"t">>, [
+                #kura_column{name = id, type = id},
+                #kura_column{name = age, type = integer}
+            ]}
+        ]
     end),
     meck:expect(m_mc_modify, up, fun() ->
         [{alter_table, <<"t">>, [{modify_column, age, float}]}]
@@ -124,11 +138,13 @@ build_db_state_modify_column_test() ->
 build_db_state_multiple_tables_test() ->
     meck:new(m_multi, [non_strict]),
     meck:expect(m_multi, up, fun() ->
-        [{create_table, <<"users">>, [#kura_column{name = id, type = id}]},
-         {create_table, <<"posts">>, [
-            #kura_column{name = id, type = id},
-            #kura_column{name = user_id, type = integer}
-         ]}]
+        [
+            {create_table, <<"users">>, [#kura_column{name = id, type = id}]},
+            {create_table, <<"posts">>, [
+                #kura_column{name = id, type = id},
+                #kura_column{name = user_id, type = integer}
+            ]}
+        ]
     end),
     State = kura_schema_diff:build_db_state([m_multi]),
     ?assertEqual(2, maps:size(State)),
@@ -172,9 +188,11 @@ build_desired_state_test() ->
     meck:new(test_schema, [non_strict]),
     meck:expect(test_schema, table, fun() -> <<"users">> end),
     meck:expect(test_schema, fields, fun() ->
-        [#kura_field{name = id, type = id, primary_key = true, nullable = false},
-         #kura_field{name = name, type = string},
-         #kura_field{name = display, type = string, virtual = true}]
+        [
+            #kura_field{name = id, type = id, primary_key = true, nullable = false},
+            #kura_field{name = name, type = string},
+            #kura_field{name = display, type = string, virtual = true}
+        ]
     end),
     State = kura_schema_diff:build_desired_state([test_schema]),
     Cols = maps:get(<<"users">>, State),
@@ -206,8 +224,10 @@ build_desired_state_all_virtual_test() ->
     meck:new(schema_virt, [non_strict]),
     meck:expect(schema_virt, table, fun() -> <<"v">> end),
     meck:expect(schema_virt, fields, fun() ->
-        [#kura_field{name = x, type = string, virtual = true},
-         #kura_field{name = y, type = integer, virtual = true}]
+        [
+            #kura_field{name = x, type = string, virtual = true},
+            #kura_field{name = y, type = integer, virtual = true}
+        ]
     end),
     State = kura_schema_diff:build_desired_state([schema_virt]),
     ?assertEqual([], maps:get(<<"v">>, State)),
@@ -244,9 +264,13 @@ diff_new_table_test() ->
     ?assertMatch([{drop_table, <<"users">>}], Down).
 
 diff_new_table_preserves_columns_test() ->
-    Cols = [#kura_column{name = id, type = id, primary_key = true, nullable = false},
-            #kura_column{name = email, type = string, nullable = false}],
-    {[{create_table, <<"users">>, CreatedCols}], _} = kura_schema_diff:diff(#{}, #{<<"users">> => Cols}),
+    Cols = [
+        #kura_column{name = id, type = id, primary_key = true, nullable = false},
+        #kura_column{name = email, type = string, nullable = false}
+    ],
+    {[{create_table, <<"users">>, CreatedCols}], _} = kura_schema_diff:diff(#{}, #{
+        <<"users">> => Cols
+    }),
     ?assertEqual(Cols, CreatedCols).
 
 diff_multiple_new_tables_test() ->
@@ -267,10 +291,14 @@ diff_add_column_test() ->
 
 diff_add_multiple_columns_test() ->
     DbCols = [#kura_column{name = id, type = id}],
-    DesiredCols = [#kura_column{name = id, type = id},
-                   #kura_column{name = age, type = integer},
-                   #kura_column{name = name, type = string}],
-    {[{alter_table, <<"t">>, Ops}], _} = kura_schema_diff:diff(#{<<"t">> => DbCols}, #{<<"t">> => DesiredCols}),
+    DesiredCols = [
+        #kura_column{name = id, type = id},
+        #kura_column{name = age, type = integer},
+        #kura_column{name = name, type = string}
+    ],
+    {[{alter_table, <<"t">>, Ops}], _} = kura_schema_diff:diff(#{<<"t">> => DbCols}, #{
+        <<"t">> => DesiredCols
+    }),
     AddedNames = [N || {add_column, #kura_column{name = N}} <- Ops],
     ?assertEqual([age, name], lists:sort(AddedNames)).
 
@@ -291,20 +319,36 @@ diff_type_change_test() ->
 diff_multiple_type_changes_test() ->
     DbCols = [#kura_column{name = a, type = integer}, #kura_column{name = b, type = string}],
     DesiredCols = [#kura_column{name = a, type = float}, #kura_column{name = b, type = text}],
-    {[{alter_table, <<"t">>, Ops}], _} = kura_schema_diff:diff(#{<<"t">> => DbCols}, #{<<"t">> => DesiredCols}),
+    {[{alter_table, <<"t">>, Ops}], _} = kura_schema_diff:diff(#{<<"t">> => DbCols}, #{
+        <<"t">> => DesiredCols
+    }),
     ?assertEqual(2, length(Ops)),
     ?assert(lists:member({modify_column, a, float}, Ops)),
     ?assert(lists:member({modify_column, b, text}, Ops)).
 
 diff_combined_add_drop_modify_test() ->
-    DbCols = [#kura_column{name = id, type = id},
-              #kura_column{name = old, type = string},
-              #kura_column{name = age, type = integer}],
-    DesiredCols = [#kura_column{name = id, type = id},
-                   #kura_column{name = new, type = boolean},
-                   #kura_column{name = age, type = float}],
-    {[{alter_table, <<"t">>, Ops}], [_]} = kura_schema_diff:diff(#{<<"t">> => DbCols}, #{<<"t">> => DesiredCols}),
-    ?assert(lists:any(fun({add_column, #kura_column{name = new}}) -> true; (_) -> false end, Ops)),
+    DbCols = [
+        #kura_column{name = id, type = id},
+        #kura_column{name = old, type = string},
+        #kura_column{name = age, type = integer}
+    ],
+    DesiredCols = [
+        #kura_column{name = id, type = id},
+        #kura_column{name = new, type = boolean},
+        #kura_column{name = age, type = float}
+    ],
+    {[{alter_table, <<"t">>, Ops}], [_]} = kura_schema_diff:diff(#{<<"t">> => DbCols}, #{
+        <<"t">> => DesiredCols
+    }),
+    ?assert(
+        lists:any(
+            fun
+                ({add_column, #kura_column{name = new}}) -> true;
+                (_) -> false
+            end,
+            Ops
+        )
+    ),
     ?assert(lists:member({drop_column, old}, Ops)),
     ?assert(lists:member({modify_column, age, float}, Ops)).
 
@@ -314,8 +358,24 @@ diff_multiple_changes_test() ->
     {Up, _Down} = kura_schema_diff:diff(#{<<"t">> => DbCols}, #{<<"t">> => DesiredCols}),
     ?assertEqual(1, length(Up)),
     [{alter_table, <<"t">>, AlterOps}] = Up,
-    ?assert(lists:any(fun({add_column, #kura_column{name = new}}) -> true; (_) -> false end, AlterOps)),
-    ?assert(lists:any(fun({drop_column, old}) -> true; (_) -> false end, AlterOps)).
+    ?assert(
+        lists:any(
+            fun
+                ({add_column, #kura_column{name = new}}) -> true;
+                (_) -> false
+            end,
+            AlterOps
+        )
+    ),
+    ?assert(
+        lists:any(
+            fun
+                ({drop_column, old}) -> true;
+                (_) -> false
+            end,
+            AlterOps
+        )
+    ).
 
 diff_multi_table_test() ->
     Db = #{<<"a">> => [#kura_column{name = id, type = id}]},
@@ -325,16 +385,30 @@ diff_multi_table_test() ->
     },
     {Up, Down} = kura_schema_diff:diff(Db, Desired),
     ?assertEqual(2, length(Up)),
-    HasCreate = lists:any(fun({create_table, <<"b">>, _}) -> true; (_) -> false end, Up),
-    HasAlter = lists:any(fun({alter_table, <<"a">>, _}) -> true; (_) -> false end, Up),
+    HasCreate = lists:any(
+        fun
+            ({create_table, <<"b">>, _}) -> true;
+            (_) -> false
+        end,
+        Up
+    ),
+    HasAlter = lists:any(
+        fun
+            ({alter_table, <<"a">>, _}) -> true;
+            (_) -> false
+        end,
+        Up
+    ),
     ?assert(HasCreate),
     ?assert(HasAlter),
     ?assertEqual(2, length(Down)).
 
 diff_does_not_drop_tables_test() ->
     %% Tables in DB but not in desired should NOT generate drop_table
-    Db = #{<<"old">> => [#kura_column{name = id, type = id}],
-           <<"keep">> => [#kura_column{name = id, type = id}]},
+    Db = #{
+        <<"old">> => [#kura_column{name = id, type = id}],
+        <<"keep">> => [#kura_column{name = id, type = id}]
+    },
     Desired = #{<<"keep">> => [#kura_column{name = id, type = id}]},
     {Up, Down} = kura_schema_diff:diff(Db, Desired),
     %% No drop_table for "old"
@@ -353,9 +427,11 @@ diff_array_type_test() ->
 diff_down_ops_are_reversible_test() ->
     %% Applying up then down should return to original state
     DbCols = [#kura_column{name = id, type = id}],
-    DesiredCols = [#kura_column{name = id, type = id},
-                   #kura_column{name = x, type = string},
-                   #kura_column{name = y, type = integer}],
+    DesiredCols = [
+        #kura_column{name = id, type = id},
+        #kura_column{name = x, type = string},
+        #kura_column{name = y, type = integer}
+    ],
     Db = #{<<"t">> => DbCols},
     Desired = #{<<"t">> => DesiredCols},
     {UpOps, DownOps} = kura_schema_diff:diff(Db, Desired),
@@ -369,7 +445,9 @@ diff_down_ops_are_reversible_test() ->
 %%====================================================================
 
 field_to_column_test() ->
-    Field = #kura_field{name = email, type = string, nullable = false, default = undefined, primary_key = false},
+    Field = #kura_field{
+        name = email, type = string, nullable = false, default = undefined, primary_key = false
+    },
     Col = kura_schema_diff:field_to_column(Field),
     ?assertEqual(email, Col#kura_column.name),
     ?assertEqual(string, Col#kura_column.type),
@@ -392,11 +470,16 @@ field_to_column_preserves_nullable_test() ->
     ?assertEqual(false, Col#kura_column.nullable).
 
 field_to_column_all_types_test() ->
-    Types = [id, integer, float, string, text, boolean, date, utc_datetime, uuid, jsonb, {array, string}],
-    lists:foreach(fun(T) ->
-        Col = kura_schema_diff:field_to_column(#kura_field{name = x, type = T}),
-        ?assertEqual(T, Col#kura_column.type)
-    end, Types).
+    Types = [
+        id, integer, float, string, text, boolean, date, utc_datetime, uuid, jsonb, {array, string}
+    ],
+    lists:foreach(
+        fun(T) ->
+            Col = kura_schema_diff:field_to_column(#kura_field{name = x, type = T}),
+            ?assertEqual(T, Col#kura_column.type)
+        end,
+        Types
+    ).
 
 %%====================================================================
 %% Integration: build_db_state + build_desired_state + diff
@@ -407,8 +490,10 @@ full_roundtrip_new_schema_test() ->
     meck:new(rt_schema, [non_strict]),
     meck:expect(rt_schema, table, fun() -> <<"items">> end),
     meck:expect(rt_schema, fields, fun() ->
-        [#kura_field{name = id, type = id, primary_key = true, nullable = false},
-         #kura_field{name = title, type = string, nullable = false}]
+        [
+            #kura_field{name = id, type = id, primary_key = true, nullable = false},
+            #kura_field{name = title, type = string, nullable = false}
+        ]
     end),
     DbState = kura_schema_diff:build_db_state([]),
     DesiredState = kura_schema_diff:build_desired_state([rt_schema]),
@@ -422,15 +507,19 @@ full_roundtrip_schema_matches_migrations_test() ->
     meck:new(rt_mig, [non_strict]),
     meck:new(rt_schema2, [non_strict]),
     meck:expect(rt_mig, up, fun() ->
-        [{create_table, <<"items">>, [
-            #kura_column{name = id, type = id, primary_key = true, nullable = false},
-            #kura_column{name = title, type = string, nullable = false}
-        ]}]
+        [
+            {create_table, <<"items">>, [
+                #kura_column{name = id, type = id, primary_key = true, nullable = false},
+                #kura_column{name = title, type = string, nullable = false}
+            ]}
+        ]
     end),
     meck:expect(rt_schema2, table, fun() -> <<"items">> end),
     meck:expect(rt_schema2, fields, fun() ->
-        [#kura_field{name = id, type = id, primary_key = true, nullable = false},
-         #kura_field{name = title, type = string, nullable = false}]
+        [
+            #kura_field{name = id, type = id, primary_key = true, nullable = false},
+            #kura_field{name = title, type = string, nullable = false}
+        ]
     end),
     DbState = kura_schema_diff:build_db_state([rt_mig]),
     DesiredState = kura_schema_diff:build_desired_state([rt_schema2]),
@@ -442,19 +531,25 @@ full_roundtrip_add_field_test() ->
     meck:new(rt_mig2, [non_strict]),
     meck:new(rt_schema3, [non_strict]),
     meck:expect(rt_mig2, up, fun() ->
-        [{create_table, <<"items">>, [
-            #kura_column{name = id, type = id}
-        ]}]
+        [
+            {create_table, <<"items">>, [
+                #kura_column{name = id, type = id}
+            ]}
+        ]
     end),
     meck:expect(rt_schema3, table, fun() -> <<"items">> end),
     meck:expect(rt_schema3, fields, fun() ->
-        [#kura_field{name = id, type = id},
-         #kura_field{name = desc, type = text}]
+        [
+            #kura_field{name = id, type = id},
+            #kura_field{name = desc, type = text}
+        ]
     end),
     DbState = kura_schema_diff:build_db_state([rt_mig2]),
     DesiredState = kura_schema_diff:build_desired_state([rt_schema3]),
     {Up, Down} = kura_schema_diff:diff(DbState, DesiredState),
-    ?assertMatch([{alter_table, <<"items">>, [{add_column, #kura_column{name = desc, type = text}}]}], Up),
+    ?assertMatch(
+        [{alter_table, <<"items">>, [{add_column, #kura_column{name = desc, type = text}}]}], Up
+    ),
     ?assertMatch([{alter_table, <<"items">>, [{drop_column, desc}]}], Down),
     meck:unload([rt_mig2, rt_schema3]).
 
@@ -463,7 +558,8 @@ full_roundtrip_add_field_test() ->
 %%====================================================================
 
 %% Re-implement apply_ops externally for testing reversibility
-apply_ops_ext([], State) -> State;
+apply_ops_ext([], State) ->
+    State;
 apply_ops_ext([{create_table, Name, Cols} | Rest], State) ->
     apply_ops_ext(Rest, State#{Name => Cols});
 apply_ops_ext([{drop_table, Name} | Rest], State) ->
@@ -473,14 +569,18 @@ apply_ops_ext([{alter_table, Name, AlterOps} | Rest], State) ->
     NewCols = apply_alter_ops_ext(AlterOps, Cols),
     apply_ops_ext(Rest, State#{Name => NewCols}).
 
-apply_alter_ops_ext([], Cols) -> Cols;
+apply_alter_ops_ext([], Cols) ->
+    Cols;
 apply_alter_ops_ext([{add_column, Col} | Rest], Cols) ->
     apply_alter_ops_ext(Rest, Cols ++ [Col]);
 apply_alter_ops_ext([{drop_column, Name} | Rest], Cols) ->
     apply_alter_ops_ext(Rest, [C || C <- Cols, C#kura_column.name =/= Name]);
 apply_alter_ops_ext([{modify_column, Name, Type} | Rest], Cols) ->
-    NewCols = [case C#kura_column.name of
-        Name -> C#kura_column{type = Type};
-        _ -> C
-    end || C <- Cols],
+    NewCols = [
+        case C#kura_column.name of
+            Name -> C#kura_column{type = Type};
+            _ -> C
+        end
+     || C <- Cols
+    ],
     apply_alter_ops_ext(Rest, NewCols).

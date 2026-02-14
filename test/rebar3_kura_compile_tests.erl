@@ -11,10 +11,12 @@
 %%====================================================================
 
 generate_create_table_test() ->
-    UpOps = [{create_table, <<"users">>, [
-        #kura_column{name = id, type = id, primary_key = true, nullable = false},
-        #kura_column{name = name, type = string, nullable = false}
-    ]}],
+    UpOps = [
+        {create_table, <<"users">>, [
+            #kura_column{name = id, type = id, primary_key = true, nullable = false},
+            #kura_column{name = name, type = string, nullable = false}
+        ]}
+    ],
     DownOps = [{drop_table, <<"users">>}],
     {ok, Mod} = compile_generated_migration("create_users", UpOps, DownOps),
     Up = Mod:up(),
@@ -31,17 +33,25 @@ generate_create_table_test() ->
     cleanup_mod(Mod).
 
 generate_alter_add_column_test() ->
-    UpOps = [{alter_table, <<"pets">>, [
-        {add_column, #kura_column{name = color, type = string}}
-    ]}],
-    DownOps = [{alter_table, <<"pets">>, [
-        {drop_column, color}
-    ]}],
+    UpOps = [
+        {alter_table, <<"pets">>, [
+            {add_column, #kura_column{name = color, type = string}}
+        ]}
+    ],
+    DownOps = [
+        {alter_table, <<"pets">>, [
+            {drop_column, color}
+        ]}
+    ],
     {ok, Mod} = compile_generated_migration("alter_pets", UpOps, DownOps),
-    ?assertMatch([{alter_table, <<"pets">>, [{add_column, #kura_column{name = color, type = string}}]}],
-                 Mod:up()),
-    ?assertMatch([{alter_table, <<"pets">>, [{drop_column, color}]}],
-                 Mod:down()),
+    ?assertMatch(
+        [{alter_table, <<"pets">>, [{add_column, #kura_column{name = color, type = string}}]}],
+        Mod:up()
+    ),
+    ?assertMatch(
+        [{alter_table, <<"pets">>, [{drop_column, color}]}],
+        Mod:down()
+    ),
     cleanup_mod(Mod).
 
 generate_alter_drop_column_test() ->
@@ -77,9 +87,11 @@ generate_multiple_ops_test() ->
     cleanup_mod(Mod).
 
 generate_column_with_default_test() ->
-    UpOps = [{create_table, <<"t">>, [
-        #kura_column{name = active, type = boolean, default = true}
-    ]}],
+    UpOps = [
+        {create_table, <<"t">>, [
+            #kura_column{name = active, type = boolean, default = true}
+        ]}
+    ],
     DownOps = [{drop_table, <<"t">>}],
     {ok, Mod} = compile_generated_migration("with_default", UpOps, DownOps),
     [{create_table, _, [Col]}] = Mod:up(),
@@ -87,9 +99,11 @@ generate_column_with_default_test() ->
     cleanup_mod(Mod).
 
 generate_array_type_test() ->
-    UpOps = [{create_table, <<"t">>, [
-        #kura_column{name = tags, type = {array, string}}
-    ]}],
+    UpOps = [
+        {create_table, <<"t">>, [
+            #kura_column{name = tags, type = {array, string}}
+        ]}
+    ],
     DownOps = [{drop_table, <<"t">>}],
     {ok, Mod} = compile_generated_migration("with_array", UpOps, DownOps),
     [{create_table, _, [Col]}] = Mod:up(),
@@ -197,18 +211,21 @@ render_alter_op({rename_column, Old, New}) ->
 
 render_column(#kura_column{name = N, type = T, nullable = Null, default = Def, primary_key = PK}) ->
     Parts = [io_lib:format("name = ~p", [N]), io_lib:format("type = ~p", [T])],
-    Parts2 = case PK of
-        true -> Parts ++ ["primary_key = true"];
-        false -> Parts
-    end,
-    Parts3 = case Null of
-        false -> Parts2 ++ ["nullable = false"];
-        true -> Parts2
-    end,
-    Parts4 = case Def of
-        undefined -> Parts3;
-        _ -> Parts3 ++ [io_lib:format("default = ~p", [Def])]
-    end,
+    Parts2 =
+        case PK of
+            true -> Parts ++ ["primary_key = true"];
+            false -> Parts
+        end,
+    Parts3 =
+        case Null of
+            false -> Parts2 ++ ["nullable = false"];
+            true -> Parts2
+        end,
+    Parts4 =
+        case Def of
+            undefined -> Parts3;
+            _ -> Parts3 ++ [io_lib:format("default = ~p", [Def])]
+        end,
     io_lib:format("#kura_column{~s}", [lists:join(", ", Parts4)]).
 
 is_schema_file(File) ->
@@ -216,7 +233,9 @@ is_schema_file(File) ->
     re:run(Bin, "-behaviou?r\\(kura_schema\\)") =/= nomatch.
 
 make_temp_dir() ->
-    Dir = filename:join("/tmp", "rebar3_kura_test_" ++ integer_to_list(erlang:unique_integer([positive]))),
+    Dir = filename:join(
+        "/tmp", "rebar3_kura_test_" ++ integer_to_list(erlang:unique_integer([positive]))
+    ),
     ok = filelib:ensure_dir(filename:join(Dir, ".")),
     Dir.
 
@@ -226,5 +245,6 @@ cleanup_dir(Dir) ->
             {ok, Files} = file:list_dir(Dir),
             [file:delete(filename:join(Dir, F)) || F <- Files],
             file:del_dir(Dir);
-        false -> ok
+        false ->
+            ok
     end.
