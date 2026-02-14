@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2] - 2026-02-14
+
+### Changed
+
+- Updated README with setup command docs and current version
+- Added ex_doc configuration for hex documentation
+
 ## [0.4.1] - 2026-02-14
 
 ### Changed
