@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.0] - 2026-02-14
+
+### Added
+
+- `rebar3 kura setup` command for bootstrapping Kura in a project
+- Generates repo module with all kura_repo_worker wrappers
+- Creates `src/migrations/` directory
+- Checks kura dependency and provider hook configuration
+- `--name` flag to customize repo module name (default: `APPNAME_repo`)
+
+### Changed
+
+- Kura dependency switched from git to hex (`~> 0.3`)
+
 ## [0.2.0] - 2026-02-14
 
 ### Added
