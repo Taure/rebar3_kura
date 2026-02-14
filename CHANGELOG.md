@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.0] - 2026-02-14
+
+### Added
+
+- Makefile for test and quality checks (`make test`, `make check`)
+
+### Changed
+
+- Bump kura dependency to `~> 0.5` (embedded schemas, many-to-many, schemaless changesets)
+
 ## [0.4.2] - 2026-02-14
 
 ### Changed
