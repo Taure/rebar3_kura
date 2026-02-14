@@ -50,7 +50,7 @@ do(State) ->
     rebar_api:info("~n==> Setting up Kura for ~s~n", [AppName]),
 
     %% Step 1: Check kura dependency
-    check_kura_dep(State),
+    check_kura_dep(State, AppDir),
 
     %% Step 2: Generate repo module
     generate_repo(AppDir, ModName, AppName),
@@ -58,7 +58,10 @@ do(State) ->
     %% Step 3: Create migrations directory
     create_migrations_dir(AppDir),
 
-    %% Step 4: Print remaining manual steps
+    %% Step 4: Check provider hook
+    check_provider_hook(AppDir),
+
+    %% Step 5: Print remaining manual steps
     print_next_steps(AppName, ModName),
 
     {ok, State}.
@@ -70,18 +73,39 @@ format_error(Reason) ->
 %% Setup steps
 %%====================================================================
 
-check_kura_dep(State) ->
+check_kura_dep(State, AppDir) ->
+    %% all_deps only sees fetched deps; also check rebar.config directly
     AllDeps = rebar_state:all_deps(State),
     case [D || D <- AllDeps, rebar_app_info:name(D) =:= <<"kura">>] of
         [_] ->
             rebar_api:info("[ok] kura dependency found", []);
         [] ->
-            rebar_api:info(
-                "[!!] kura not found in deps. Add to rebar.config:~n"
-                "     {deps, [{kura, \"~~> 0.3\"}]}.",
-                []
-            )
+            case has_kura_in_config(AppDir) of
+                true ->
+                    rebar_api:info("[ok] kura dependency declared in rebar.config", []);
+                false ->
+                    rebar_api:info(
+                        "[!!] kura not found in deps. Add to rebar.config:~n"
+                        "     {deps, [{kura, \"~~> 0.3\"}]}.",
+                        []
+                    )
+            end
     end.
+
+has_kura_in_config(AppDir) ->
+    ConfigFile = filename:join(AppDir, "rebar.config"),
+    case file:consult(ConfigFile) of
+        {ok, Terms} ->
+            Deps = proplists:get_value(deps, Terms, []),
+            lists:any(fun is_kura_dep/1, Deps);
+        _ ->
+            false
+    end.
+
+is_kura_dep(kura) -> true;
+is_kura_dep({kura, _}) -> true;
+is_kura_dep({kura, _, _}) -> true;
+is_kura_dep(_) -> false.
 
 generate_repo(AppDir, ModName, AppName) ->
     FileName = filename:join([AppDir, "src", ModName ++ ".erl"]),
@@ -103,6 +127,28 @@ create_migrations_dir(AppDir) ->
             ok = filelib:ensure_dir(filename:join(MigDir, ".")),
             ok = file:make_dir(MigDir),
             rebar_api:info("[ok] created src/migrations/", [])
+    end.
+
+check_provider_hook(AppDir) ->
+    ConfigFile = filename:join(AppDir, "rebar.config"),
+    case file:consult(ConfigFile) of
+        {ok, Terms} ->
+            Hooks = proplists:get_value(provider_hooks, Terms, []),
+            PreHooks = proplists:get_value(pre, Hooks, []),
+            case lists:member({compile, {kura, compile}}, PreHooks) of
+                true ->
+                    rebar_api:info("[ok] provider hook configured", []);
+                false ->
+                    rebar_api:info(
+                        "[!!] provider hook missing. Add to rebar.config:~n"
+                        "     {provider_hooks, [{pre, [{compile, {kura, compile}}]}]}.",
+                        []
+                    )
+            end;
+        _ ->
+            rebar_api:info(
+                "[!!] could not read rebar.config to check provider hooks", []
+            )
     end.
 
 print_next_steps(AppName, ModName) ->
