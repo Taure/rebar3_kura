@@ -176,7 +176,6 @@ diff_columns(DbCols, DesiredCols) ->
 
     {AddUp ++ DropUp ++ ModUp, AddDown ++ DropDown ++ ModDown}.
 
--dialyzer({nowarn_function, types_equal/2}).
 types_equal({enum, _}, {enum, _}) -> true;
 types_equal(A, B) -> A =:= B.
 
