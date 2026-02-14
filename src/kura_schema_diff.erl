@@ -160,7 +160,7 @@ diff_columns(DbCols, DesiredCols) ->
         fun(Name, {MU, MD}) ->
             DbCol = maps:get(Name, DbMap),
             DesCol = maps:get(Name, DesiredMap),
-            case DbCol#kura_column.type =:= DesCol#kura_column.type of
+            case types_equal(DbCol#kura_column.type, DesCol#kura_column.type) of
                 true ->
                     {MU, MD};
                 false ->
@@ -175,6 +175,10 @@ diff_columns(DbCols, DesiredCols) ->
     ),
 
     {AddUp ++ DropUp ++ ModUp, AddDown ++ DropDown ++ ModDown}.
+
+-dialyzer({nowarn_function, types_equal/2}).
+types_equal({enum, _}, {enum, _}) -> true;
+types_equal(A, B) -> A =:= B.
 
 col_map(Cols) ->
     maps:from_list([{C#kura_column.name, C} || C <- Cols]).
