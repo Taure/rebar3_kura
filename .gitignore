@@ -1,0 +1,11 @@
+_build/
+_checkouts/
+doc/
+ebin/
+*.beam
+*.plt
+*.o
+*.swp
+*~
+rebar.lock
+rebar3.crashdump

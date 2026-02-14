@@ -1,0 +1,10 @@
+{application, rebar3_kura, [
+    {description, "Rebar3 plugin for auto-generating Kura migrations from schema changes"},
+    {vsn, "git"},
+    {registered, []},
+    {applications, [kernel, stdlib]},
+    {env, []},
+    {modules, []},
+    {licenses, ["MIT"]},
+    {links, [{"GitHub", "https://github.com/Taure/rebar3_kura"}]}
+]}.
