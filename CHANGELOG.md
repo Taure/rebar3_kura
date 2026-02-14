@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.0] - 2026-02-14
+
+### Added
+
+- Xref, dialyzer, and erlfmt checks
+- PropEr property-based tests
+- Migration rendering tests
+
 ## [0.1.0] - 2026-02-14
 
 ### Added
