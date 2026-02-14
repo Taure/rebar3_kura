@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0] - 2026-02-14
+
+### Added
+
+- `types_equal/2` in `kura_schema_diff` to handle enum type equality
+- Prevents no-op `ALTER TABLE` when only enum values change (both map to `VARCHAR(255)`)
+
 ## [0.3.0] - 2026-02-14
 
 ### Added
