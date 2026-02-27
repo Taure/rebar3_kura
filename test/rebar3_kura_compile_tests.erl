@@ -118,6 +118,35 @@ generate_rename_column_test() ->
     ?assertMatch([{alter_table, <<"t">>, [{rename_column, new, old}]}], Mod:down()),
     cleanup_mod(Mod).
 
+generate_execute_op_test() ->
+    SQL = <<"ALTER TABLE \"users\" ALTER COLUMN \"name\" SET NOT NULL">>,
+    UpOps = [{execute, SQL}],
+    DownOps = [{execute, <<"ALTER TABLE \"users\" ALTER COLUMN \"name\" DROP NOT NULL">>}],
+    {ok, Mod} = compile_generated_migration("execute_op", UpOps, DownOps),
+    ?assertMatch([{execute, SQL}], Mod:up()),
+    cleanup_mod(Mod).
+
+generate_column_with_references_test() ->
+    UpOps = [
+        {create_table, <<"posts">>, [
+            #kura_column{name = id, type = id, primary_key = true},
+            #kura_column{
+                name = user_id,
+                type = integer,
+                references = {<<"users">>, id},
+                on_delete = cascade,
+                on_update = no_action
+            }
+        ]}
+    ],
+    DownOps = [{drop_table, <<"posts">>}],
+    {ok, Mod} = compile_generated_migration("with_refs", UpOps, DownOps),
+    [{create_table, _, [_, FkCol]}] = Mod:up(),
+    ?assertEqual({<<"users">>, id}, FkCol#kura_column.references),
+    ?assertEqual(cascade, FkCol#kura_column.on_delete),
+    ?assertEqual(no_action, FkCol#kura_column.on_update),
+    cleanup_mod(Mod).
+
 %%====================================================================
 %% Schema file detection tests
 %%====================================================================
@@ -198,7 +227,10 @@ render_op({drop_table, Table}) ->
     io_lib:format("{drop_table, <<\"~s\">>}", [Table]);
 render_op({alter_table, Table, AlterOps}) ->
     OpStrs = lists:join(",\n        ", [render_alter_op(Op) || Op <- AlterOps]),
-    io_lib:format("{alter_table, <<\"~s\">>, [~n        ~s~n    ]}", [Table, OpStrs]).
+    io_lib:format("{alter_table, <<\"~s\">>, [~n        ~s~n    ]}", [Table, OpStrs]);
+render_op({execute, SQL}) ->
+    Escaped = string:replace(binary_to_list(SQL), "\"", "\\\"", all),
+    io_lib:format("{execute, <<\"~s\">>}", [Escaped]).
 
 render_alter_op({add_column, Col}) ->
     io_lib:format("{add_column, ~s}", [render_column(Col)]);
@@ -209,7 +241,16 @@ render_alter_op({modify_column, Name, Type}) ->
 render_alter_op({rename_column, Old, New}) ->
     io_lib:format("{rename_column, ~p, ~p}", [Old, New]).
 
-render_column(#kura_column{name = N, type = T, nullable = Null, default = Def, primary_key = PK}) ->
+render_column(#kura_column{
+    name = N,
+    type = T,
+    nullable = Null,
+    default = Def,
+    primary_key = PK,
+    references = Refs,
+    on_delete = OnDel,
+    on_update = OnUpd
+}) ->
     Parts = [io_lib:format("name = ~p", [N]), io_lib:format("type = ~p", [T])],
     Parts2 =
         case PK of
@@ -226,7 +267,22 @@ render_column(#kura_column{name = N, type = T, nullable = Null, default = Def, p
             undefined -> Parts3;
             _ -> Parts3 ++ [io_lib:format("default = ~p", [Def])]
         end,
-    io_lib:format("#kura_column{~s}", [lists:join(", ", Parts4)]).
+    Parts5 =
+        case Refs of
+            undefined -> Parts4;
+            _ -> Parts4 ++ [io_lib:format("references = ~p", [Refs])]
+        end,
+    Parts6 =
+        case OnDel of
+            undefined -> Parts5;
+            _ -> Parts5 ++ [io_lib:format("on_delete = ~p", [OnDel])]
+        end,
+    Parts7 =
+        case OnUpd of
+            undefined -> Parts6;
+            _ -> Parts6 ++ [io_lib:format("on_update = ~p", [OnUpd])]
+        end,
+    io_lib:format("#kura_column{~s}", [lists:join(", ", Parts7)]).
 
 is_schema_file(File) ->
     {ok, Bin} = file:read_file(File),

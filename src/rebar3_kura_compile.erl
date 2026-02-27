@@ -186,6 +186,19 @@ derive_description(Ops) ->
             "create_" ++ binary_to_list(Table);
         [{alter_table, Table, _}] ->
             "alter_" ++ binary_to_list(Table);
+        [{alter_table, Table, _} | Rest] when Rest =/= [] ->
+            case
+                lists:all(
+                    fun
+                        ({execute, _}) -> true;
+                        (_) -> false
+                    end,
+                    Rest
+                )
+            of
+                true -> "alter_" ++ binary_to_list(Table);
+                false -> "update_schema"
+            end;
         [{drop_table, Table}] ->
             "drop_" ++ binary_to_list(Table);
         _ ->
@@ -218,7 +231,10 @@ render_op({drop_table, Table}) ->
     io_lib:format("{drop_table, <<\"~s\">>}", [Table]);
 render_op({alter_table, Table, AlterOps}) ->
     OpStrs = lists:join(",\n        ", [render_alter_op(Op) || Op <- AlterOps]),
-    io_lib:format("{alter_table, <<\"~s\">>, [~n        ~s~n    ]}", [Table, OpStrs]).
+    io_lib:format("{alter_table, <<\"~s\">>, [~n        ~s~n    ]}", [Table, OpStrs]);
+render_op({execute, SQL}) ->
+    Escaped = string:replace(binary_to_list(SQL), "\"", "\\\"", all),
+    io_lib:format("{execute, <<\"~s\">>}", [Escaped]).
 
 render_alter_op({add_column, Col}) ->
     io_lib:format("{add_column, ~s}", [render_column(Col)]);
@@ -229,7 +245,16 @@ render_alter_op({modify_column, Name, Type}) ->
 render_alter_op({rename_column, Old, New}) ->
     io_lib:format("{rename_column, ~p, ~p}", [Old, New]).
 
-render_column(#kura_column{name = N, type = T, nullable = Null, default = Def, primary_key = PK}) ->
+render_column(#kura_column{
+    name = N,
+    type = T,
+    nullable = Null,
+    default = Def,
+    primary_key = PK,
+    references = Refs,
+    on_delete = OnDel,
+    on_update = OnUpd
+}) ->
     Parts = [io_lib:format("name = ~p", [N]), io_lib:format("type = ~p", [T])],
     Parts2 =
         case PK of
@@ -246,4 +271,19 @@ render_column(#kura_column{name = N, type = T, nullable = Null, default = Def, p
             undefined -> Parts3;
             _ -> Parts3 ++ [io_lib:format("default = ~p", [Def])]
         end,
-    io_lib:format("#kura_column{~s}", [lists:join(", ", Parts4)]).
+    Parts5 =
+        case Refs of
+            undefined -> Parts4;
+            _ -> Parts4 ++ [io_lib:format("references = ~p", [Refs])]
+        end,
+    Parts6 =
+        case OnDel of
+            undefined -> Parts5;
+            _ -> Parts5 ++ [io_lib:format("on_delete = ~p", [OnDel])]
+        end,
+    Parts7 =
+        case OnUpd of
+            undefined -> Parts6;
+            _ -> Parts6 ++ [io_lib:format("on_update = ~p", [OnUpd])]
+        end,
+    io_lib:format("#kura_column{~s}", [lists:join(", ", Parts7)]).

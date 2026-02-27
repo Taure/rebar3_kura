@@ -86,7 +86,7 @@ check_kura_dep(State, AppDir) ->
                 false ->
                     rebar_api:info(
                         "[!!] kura not found in deps. Add to rebar.config:~n"
-                        "     {deps, [{kura, \"~~> 0.3\"}]}.",
+                        "     {deps, [{kura, \"~~> 1.2\"}]}.",
                         []
                     )
             end
@@ -210,7 +210,10 @@ render_repo(ModName, AppName) ->
         "    preload/3,~n"
         "    transaction/1,~n"
         "    multi/1,~n"
-        "    query/2~n"
+        "    query/2,~n"
+        "    exists/1,~n"
+        "    reload/2,~n"
+        "    insert_all/3~n"
         "]).~n"
         "~n"
         "config() ->~n"
@@ -240,6 +243,9 @@ render_repo(ModName, AppName) ->
         "preload(Schema, Records, Assocs) -> kura_repo_worker:preload(?MODULE, Schema, Records, Assocs).~n"
         "transaction(Fun) -> kura_repo_worker:transaction(?MODULE, Fun).~n"
         "multi(Multi) -> kura_repo_worker:multi(?MODULE, Multi).~n"
-        "query(SQL, Params) -> kura_repo_worker:query(?MODULE, SQL, Params).~n",
+        "query(SQL, Params) -> kura_repo_worker:query(?MODULE, SQL, Params).~n"
+        "exists(Q) -> kura_repo_worker:exists(?MODULE, Q).~n"
+        "reload(Schema, Record) -> kura_repo_worker:reload(?MODULE, Schema, Record).~n"
+        "insert_all(Schema, Entries, Opts) -> kura_repo_worker:insert_all(?MODULE, Schema, Entries, Opts).~n",
         [ModName, AppName, AppName]
     ).

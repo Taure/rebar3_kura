@@ -424,6 +424,95 @@ diff_array_type_test() ->
     {[{alter_table, <<"t">>, [{modify_column, tags, {array, integer}}]}], _} =
         kura_schema_diff:diff(#{<<"t">> => DbCols}, #{<<"t">> => DesiredCols}).
 
+diff_nullable_change_test() ->
+    DbCols = [
+        #kura_column{name = id, type = id},
+        #kura_column{name = name, type = string, nullable = true}
+    ],
+    DesiredCols = [
+        #kura_column{name = id, type = id},
+        #kura_column{name = name, type = string, nullable = false}
+    ],
+    {Up, Down} = kura_schema_diff:diff(#{<<"t">> => DbCols}, #{<<"t">> => DesiredCols}),
+    ?assertMatch([{execute, <<"ALTER TABLE \"t\" ALTER COLUMN \"name\" SET NOT NULL">>}], Up),
+    ?assertMatch([{execute, <<"ALTER TABLE \"t\" ALTER COLUMN \"name\" DROP NOT NULL">>}], Down).
+
+diff_default_change_test() ->
+    DbCols = [#kura_column{name = active, type = boolean, default = undefined}],
+    DesiredCols = [#kura_column{name = active, type = boolean, default = true}],
+    {Up, Down} = kura_schema_diff:diff(#{<<"t">> => DbCols}, #{<<"t">> => DesiredCols}),
+    ?assertMatch([{execute, <<"ALTER TABLE \"t\" ALTER COLUMN \"active\" SET DEFAULT true">>}], Up),
+    ?assertMatch([{execute, <<"ALTER TABLE \"t\" ALTER COLUMN \"active\" DROP DEFAULT">>}], Down).
+
+diff_default_removal_test() ->
+    DbCols = [#kura_column{name = active, type = boolean, default = true}],
+    DesiredCols = [#kura_column{name = active, type = boolean, default = undefined}],
+    {Up, Down} = kura_schema_diff:diff(#{<<"t">> => DbCols}, #{<<"t">> => DesiredCols}),
+    ?assertMatch([{execute, <<"ALTER TABLE \"t\" ALTER COLUMN \"active\" DROP DEFAULT">>}], Up),
+    ?assertMatch(
+        [{execute, <<"ALTER TABLE \"t\" ALTER COLUMN \"active\" SET DEFAULT true">>}], Down
+    ).
+
+diff_combined_type_and_nullable_test() ->
+    DbCols = [#kura_column{name = age, type = integer, nullable = true}],
+    DesiredCols = [#kura_column{name = age, type = float, nullable = false}],
+    {Up, _Down} = kura_schema_diff:diff(#{<<"t">> => DbCols}, #{<<"t">> => DesiredCols}),
+    ?assert(
+        lists:any(
+            fun
+                ({alter_table, _, [{modify_column, age, float}]}) -> true;
+                (_) -> false
+            end,
+            Up
+        )
+    ),
+    ?assert(
+        lists:any(
+            fun
+                ({execute, <<"ALTER TABLE \"t\" ALTER COLUMN \"age\" SET NOT NULL">>}) -> true;
+                (_) -> false
+            end,
+            Up
+        )
+    ).
+
+build_db_state_nullable_replay_test() ->
+    meck:new(m_nra_create, [non_strict]),
+    meck:new(m_nrb_alter, [non_strict]),
+    meck:expect(m_nra_create, up, fun() ->
+        [
+            {create_table, <<"t">>, [
+                #kura_column{name = id, type = id},
+                #kura_column{name = name, type = string, nullable = true}
+            ]}
+        ]
+    end),
+    meck:expect(m_nrb_alter, up, fun() ->
+        [{execute, <<"ALTER TABLE \"t\" ALTER COLUMN \"name\" SET NOT NULL">>}]
+    end),
+    State = kura_schema_diff:build_db_state([m_nra_create, m_nrb_alter]),
+    [_, NameCol] = maps:get(<<"t">>, State),
+    ?assertEqual(false, NameCol#kura_column.nullable),
+    meck:unload([m_nra_create, m_nrb_alter]).
+
+build_db_state_default_replay_test() ->
+    meck:new(m_dra_create, [non_strict]),
+    meck:new(m_drb_alter, [non_strict]),
+    meck:expect(m_dra_create, up, fun() ->
+        [
+            {create_table, <<"t">>, [
+                #kura_column{name = active, type = boolean}
+            ]}
+        ]
+    end),
+    meck:expect(m_drb_alter, up, fun() ->
+        [{execute, <<"ALTER TABLE \"t\" ALTER COLUMN \"active\" SET DEFAULT true">>}]
+    end),
+    State = kura_schema_diff:build_db_state([m_dra_create, m_drb_alter]),
+    [Col] = maps:get(<<"t">>, State),
+    ?assertEqual(true, Col#kura_column.default),
+    meck:unload([m_dra_create, m_drb_alter]).
+
 diff_down_ops_are_reversible_test() ->
     %% Applying up then down should return to original state
     DbCols = [#kura_column{name = id, type = id}],
@@ -469,6 +558,17 @@ field_to_column_preserves_nullable_test() ->
     Col = kura_schema_diff:field_to_column(Field),
     ?assertEqual(false, Col#kura_column.nullable).
 
+field_to_column_custom_column_name_test() ->
+    Field = #kura_field{name = email, type = string, column = <<"email_address">>},
+    Col = kura_schema_diff:field_to_column(Field),
+    ?assertEqual(email_address, Col#kura_column.name),
+    ?assertEqual(string, Col#kura_column.type).
+
+field_to_column_undefined_column_uses_field_name_test() ->
+    Field = #kura_field{name = email, type = string, column = undefined},
+    Col = kura_schema_diff:field_to_column(Field),
+    ?assertEqual(email, Col#kura_column.name).
+
 field_to_column_all_types_test() ->
     Types = [
         id, integer, float, string, text, boolean, date, utc_datetime, uuid, jsonb, {array, string}
@@ -480,6 +580,66 @@ field_to_column_all_types_test() ->
         end,
         Types
     ).
+
+%%====================================================================
+%% belongs_to enrichment tests
+%%====================================================================
+
+build_desired_state_belongs_to_enrichment_test() ->
+    meck:new(bt_user, [non_strict]),
+    meck:new(bt_post, [non_strict]),
+    meck:expect(bt_user, table, fun() -> <<"users">> end),
+    meck:expect(bt_user, fields, fun() ->
+        [#kura_field{name = id, type = id, primary_key = true}]
+    end),
+    meck:expect(bt_post, table, fun() -> <<"posts">> end),
+    meck:expect(bt_post, fields, fun() ->
+        [
+            #kura_field{name = id, type = id, primary_key = true},
+            #kura_field{name = user_id, type = integer}
+        ]
+    end),
+    meck:expect(bt_post, associations, fun() ->
+        [#kura_assoc{name = user, type = belongs_to, schema = bt_user, foreign_key = user_id}]
+    end),
+    State = kura_schema_diff:build_desired_state([bt_post]),
+    [_, FkCol] = maps:get(<<"posts">>, State),
+    ?assertEqual({<<"users">>, id}, FkCol#kura_column.references),
+    ?assertEqual(no_action, FkCol#kura_column.on_delete),
+    meck:unload([bt_user, bt_post]).
+
+build_desired_state_no_associations_callback_test() ->
+    meck:new(na_schema, [non_strict]),
+    meck:expect(na_schema, table, fun() -> <<"items">> end),
+    meck:expect(na_schema, fields, fun() ->
+        [#kura_field{name = id, type = id, primary_key = true}]
+    end),
+    State = kura_schema_diff:build_desired_state([na_schema]),
+    [Col] = maps:get(<<"items">>, State),
+    ?assertEqual(undefined, Col#kura_column.references),
+    meck:unload(na_schema).
+
+build_desired_state_target_schema_unavailable_test() ->
+    meck:new(ts_post, [non_strict]),
+    meck:expect(ts_post, table, fun() -> <<"posts">> end),
+    meck:expect(ts_post, fields, fun() ->
+        [
+            #kura_field{name = id, type = id, primary_key = true},
+            #kura_field{name = user_id, type = integer}
+        ]
+    end),
+    meck:expect(ts_post, associations, fun() ->
+        [
+            #kura_assoc{
+                name = user, type = belongs_to, schema = nonexistent_schema, foreign_key = user_id
+            }
+        ]
+    end),
+    State = kura_schema_diff:build_desired_state([ts_post]),
+    [_, FkCol] = maps:get(<<"posts">>, State),
+    %% Should gracefully skip - no references set
+    ?assertEqual(undefined, FkCol#kura_column.references),
+    meck:unload(ts_post).
 
 %%====================================================================
 %% Integration: build_db_state + build_desired_state + diff

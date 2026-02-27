@@ -26,6 +26,9 @@ render_repo_test_() ->
             ?_assert(string:find(Content, "application:get_env(my_app") =/= nomatch)},
         {"default database name", ?_assert(string:find(Content, "my_app_dev") =/= nomatch)},
         {"pool uses ?MODULE", ?_assert(string:find(Content, "pool => ?MODULE") =/= nomatch)},
+        {"exists exported", ?_assert(string:find(Content, "exists/1") =/= nomatch)},
+        {"reload exported", ?_assert(string:find(Content, "reload/2") =/= nomatch)},
+        {"insert_all/3 exported", ?_assert(string:find(Content, "insert_all/3") =/= nomatch)},
         {"delegates to kura_repo_worker",
             ?_assert(string:find(Content, "kura_repo_worker:") =/= nomatch)}
     ].
