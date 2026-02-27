@@ -22,15 +22,13 @@ jobs:
           otp-version: ${{ matrix.otp }}
           rebar3-version: '3.24'
 
-      - name: Restore rebar3 cache
+      - name: Restore hex cache
         uses: actions/cache@v4
         with:
-          path: |
-            _build
-            ~/.cache/rebar3
-          key: ${{ runner.os }}-rebar3-${{ matrix.otp }}-${{ hashFiles('rebar.lock') }}
+          path: ~/.cache/rebar3
+          key: ${{ runner.os }}-hex-${{ matrix.otp }}-${{ hashFiles('rebar.lock') }}
           restore-keys: |
-            ${{ runner.os }}-rebar3-${{ matrix.otp }}-
+            ${{ runner.os }}-hex-${{ matrix.otp }}-
 
       - name: Compile
         run: rebar3 compile
