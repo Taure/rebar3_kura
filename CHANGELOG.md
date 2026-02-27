@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.6.0] - 2026-02-27
+
+### Changed
+
+- Bump kura dependency to `~> 1.2`
+
 ## [0.5.0] - 2026-02-14
 
 ### Added
