@@ -162,12 +162,25 @@ print_next_steps(AppName, ModName) ->
         "       {pre, [{compile, {kura, compile}}]}~n"
         "   ]}.~n"
         "~n"
-        "2. Start the repo and run migrations in ~s_app:start/2:~n"
+        "2. Add database config to config/sys.config:~n"
+        "~n"
+        "   [{~s, [~n"
+        "       {~s, #{~n"
+        "           database => <<\"~s_dev\">>,~n"
+        "           hostname => <<\"localhost\">>,~n"
+        "           port => 5432,~n"
+        "           username => <<\"postgres\">>,~n"
+        "           password => <<\"postgres\">>,~n"
+        "           pool_size => 10~n"
+        "       }}~n"
+        "   ]}].~n"
+        "~n"
+        "3. Start the repo and run migrations in ~s_app:start/2:~n"
         "~n"
         "   ~s:start(),~n"
         "   kura_migrator:migrate(~s),~n"
         "~n"
-        "3. Create a schema in src/schemas/:~n"
+        "4. Create a schema in src/schemas/:~n"
         "~n"
         "   -module(my_schema).~n"
         "   -behaviour(kura_schema).~n"
@@ -180,8 +193,8 @@ print_next_steps(AppName, ModName) ->
         "       #kura_field{name = name, type = string}~n"
         "   ].~n"
         "~n"
-        "4. Run `rebar3 compile` — migrations will be auto-generated.~n",
-        [AppName, ModName, ModName]
+        "5. Run `rebar3 compile` — migrations will be auto-generated.~n",
+        [AppName, ModName, AppName, AppName, ModName, ModName]
     ).
 
 %%====================================================================
@@ -194,7 +207,7 @@ render_repo(ModName, AppName) ->
         "-behaviour(kura_repo).~n"
         "~n"
         "-export([~n"
-        "    config/0,~n"
+        "    otp_app/0,~n"
         "    start/0,~n"
         "    all/1,~n"
         "    get/2,~n"
@@ -216,17 +229,7 @@ render_repo(ModName, AppName) ->
         "    insert_all/3~n"
         "]).~n"
         "~n"
-        "config() ->~n"
-        "    Database = application:get_env(~s, database, <<\"~s_dev\">>),~n"
-        "    #{~n"
-        "        pool => ?MODULE,~n"
-        "        database => Database,~n"
-        "        hostname => <<\"localhost\">>,~n"
-        "        port => 5432,~n"
-        "        username => <<\"postgres\">>,~n"
-        "        password => <<\"postgres\">>,~n"
-        "        pool_size => 10~n"
-        "    }.~n"
+        "otp_app() -> ~s.~n"
         "~n"
         "start() -> kura_repo_worker:start(?MODULE).~n"
         "all(Q) -> kura_repo_worker:all(?MODULE, Q).~n"
@@ -247,5 +250,5 @@ render_repo(ModName, AppName) ->
         "exists(Q) -> kura_repo_worker:exists(?MODULE, Q).~n"
         "reload(Schema, Record) -> kura_repo_worker:reload(?MODULE, Schema, Record).~n"
         "insert_all(Schema, Entries, Opts) -> kura_repo_worker:insert_all(?MODULE, Schema, Entries, Opts).~n",
-        [ModName, AppName, AppName]
+        [ModName, AppName]
     ).

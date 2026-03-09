@@ -7,7 +7,8 @@ render_repo_test_() ->
     [
         {"module name", ?_assert(string:find(Content, "-module(my_app_db).") =/= nomatch)},
         {"behaviour", ?_assert(string:find(Content, "-behaviour(kura_repo).") =/= nomatch)},
-        {"config exported", ?_assert(string:find(Content, "config/0") =/= nomatch)},
+        {"otp_app exported", ?_assert(string:find(Content, "otp_app/0") =/= nomatch)},
+        {"otp_app returns app", ?_assert(string:find(Content, "otp_app() -> my_app.") =/= nomatch)},
         {"start exported", ?_assert(string:find(Content, "start/0") =/= nomatch)},
         {"all exported", ?_assert(string:find(Content, "all/1") =/= nomatch)},
         {"get exported", ?_assert(string:find(Content, "get/2") =/= nomatch)},
@@ -22,10 +23,6 @@ render_repo_test_() ->
         {"transaction exported", ?_assert(string:find(Content, "transaction/1") =/= nomatch)},
         {"multi exported", ?_assert(string:find(Content, "multi/1") =/= nomatch)},
         {"query exported", ?_assert(string:find(Content, "query/2") =/= nomatch)},
-        {"database uses app env",
-            ?_assert(string:find(Content, "application:get_env(my_app") =/= nomatch)},
-        {"default database name", ?_assert(string:find(Content, "my_app_dev") =/= nomatch)},
-        {"pool uses ?MODULE", ?_assert(string:find(Content, "pool => ?MODULE") =/= nomatch)},
         {"exists exported", ?_assert(string:find(Content, "exists/1") =/= nomatch)},
         {"reload exported", ?_assert(string:find(Content, "reload/2") =/= nomatch)},
         {"insert_all/3 exported", ?_assert(string:find(Content, "insert_all/3") =/= nomatch)},
@@ -53,8 +50,9 @@ render_repo_compiles_test() ->
 render_repo_default_name_test() ->
     Content = lists:flatten(rebar3_kura_setup:render_repo("pet_store_repo", "pet_store")),
     ?assert(string:find(Content, "-module(pet_store_repo).") =/= nomatch),
-    ?assert(string:find(Content, "pet_store_dev") =/= nomatch).
+    ?assert(string:find(Content, "otp_app() -> pet_store.") =/= nomatch).
 
 render_repo_custom_name_test() ->
     Content = lists:flatten(rebar3_kura_setup:render_repo("my_db", "my_app")),
-    ?assert(string:find(Content, "-module(my_db).") =/= nomatch).
+    ?assert(string:find(Content, "-module(my_db).") =/= nomatch),
+    ?assert(string:find(Content, "otp_app() -> my_app.") =/= nomatch).
