@@ -124,9 +124,12 @@ create_migrations_dir(AppDir) ->
         true ->
             rebar_api:info("[ok] src/migrations/ already exists", []);
         false ->
-            ok = filelib:ensure_dir(filename:join(MigDir, ".")),
-            ok = file:make_dir(MigDir),
-            rebar_api:info("[ok] created src/migrations/", [])
+            case file:make_dir(MigDir) of
+                ok ->
+                    rebar_api:info("[ok] created src/migrations/", []);
+                {error, eexist} ->
+                    rebar_api:info("[ok] src/migrations/ already exists", [])
+            end
     end.
 
 check_provider_hook(AppDir) ->
