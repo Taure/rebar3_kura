@@ -208,13 +208,16 @@ derive_description(Ops) ->
 render_migration(ModName, UpOps, DownOps) ->
     io_lib:format(
         "-module(~s).~n"
+        "-moduledoc false.~n"
         "-behaviour(kura_migration).~n"
         "-include_lib(\"kura/include/kura.hrl\").~n"
         "-export([up/0, down/0]).~n"
         "~n"
+        "-spec up() -> [kura_migration:operation()].~n"
         "up() ->~n"
         "    ~s.~n"
         "~n"
+        "-spec down() -> [kura_migration:operation()].~n"
         "down() ->~n"
         "    ~s.~n",
         [ModName, render_ops(UpOps), render_ops(DownOps)]
