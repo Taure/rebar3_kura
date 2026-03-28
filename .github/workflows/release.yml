@@ -5,4 +5,4 @@ on:
 
 jobs:
   release:
-    uses: Taure/erlang-ci/.github/workflows/release.yml@v1
+    uses: Taure/erlang-ci/.github/workflows/release.yml@v2
