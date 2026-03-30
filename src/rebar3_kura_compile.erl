@@ -182,20 +182,15 @@ make_timestamp(MigDir) ->
 
 derive_description(Ops) ->
     case Ops of
-        [{create_table, Table, _}] ->
-            "create_" ++ binary_to_list(Table);
+        [{create_table, Table, _} | Rest] ->
+            case lists:all(fun is_index_op/1, Rest) of
+                true -> "create_" ++ binary_to_list(Table);
+                false -> "update_schema"
+            end;
         [{alter_table, Table, _}] ->
             "alter_" ++ binary_to_list(Table);
         [{alter_table, Table, _} | Rest] when Rest =/= [] ->
-            case
-                lists:all(
-                    fun
-                        ({execute, _}) -> true;
-                        (_) -> false
-                    end,
-                    Rest
-                )
-            of
+            case lists:all(fun(Op) -> is_index_op(Op) orelse is_execute_op(Op) end, Rest) of
                 true -> "alter_" ++ binary_to_list(Table);
                 false -> "update_schema"
             end;
@@ -204,6 +199,13 @@ derive_description(Ops) ->
         _ ->
             "update_schema"
     end.
+
+is_index_op({create_index, _, _, _}) -> true;
+is_index_op({drop_index, _}) -> true;
+is_index_op(_) -> false.
+
+is_execute_op({execute, _}) -> true;
+is_execute_op(_) -> false.
 
 render_migration(ModName, UpOps, DownOps) ->
     io_lib:format(
@@ -235,6 +237,10 @@ render_op({drop_table, Table}) ->
 render_op({alter_table, Table, AlterOps}) ->
     OpStrs = lists:join(",\n        ", [render_alter_op(Op) || Op <- AlterOps]),
     io_lib:format("{alter_table, <<\"~s\">>, [~n        ~s~n    ]}", [Table, OpStrs]);
+render_op({create_index, Table, Columns, Opts}) ->
+    io_lib:format("{create_index, <<\"~s\">>, ~w, ~w}", [Table, Columns, Opts]);
+render_op({drop_index, Name}) ->
+    io_lib:format("{drop_index, <<\"~s\">>}", [Name]);
 render_op({execute, SQL}) ->
     Escaped = string:replace(binary_to_list(SQL), "\"", "\\\"", all),
     io_lib:format("{execute, <<\"~s\">>}", [Escaped]).

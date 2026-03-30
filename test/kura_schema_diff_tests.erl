@@ -3,12 +3,15 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("kura/include/kura.hrl").
 
+cols(State) -> maps:get(columns, State).
+idxs(State) -> maps:get(indexes, State).
+
 %%====================================================================
 %% build_db_state tests
 %%====================================================================
 
 build_db_state_empty_test() ->
-    ?assertEqual(#{}, kura_schema_diff:build_db_state([])).
+    ?assertEqual(#{columns => #{}, indexes => #{}}, kura_schema_diff:build_db_state([])).
 
 build_db_state_create_table_test() ->
     meck:new(m_create, [non_strict]),
@@ -20,7 +23,7 @@ build_db_state_create_table_test() ->
             ]}
         ]
     end),
-    State = kura_schema_diff:build_db_state([m_create]),
+    State = cols(kura_schema_diff:build_db_state([m_create])),
     ?assert(maps:is_key(<<"pets">>, State)),
     ?assertEqual(2, length(maps:get(<<"pets">>, State))),
     meck:unload(m_create).
@@ -42,7 +45,7 @@ build_db_state_alter_table_test() ->
             ]}
         ]
     end),
-    State = kura_schema_diff:build_db_state([m_a_create, m_b_alter]),
+    State = cols(kura_schema_diff:build_db_state([m_a_create, m_b_alter])),
     Cols = maps:get(<<"pets">>, State),
     ?assertEqual(2, length(Cols)),
     Names = [C#kura_column.name || C <- Cols],
@@ -58,7 +61,7 @@ build_db_state_drop_table_test() ->
     meck:expect(m_drop, up, fun() ->
         [{drop_table, <<"tmp">>}]
     end),
-    State = kura_schema_diff:build_db_state([m_create3, m_drop]),
+    State = cols(kura_schema_diff:build_db_state([m_create3, m_drop])),
     ?assertNot(maps:is_key(<<"tmp">>, State)),
     meck:unload([m_create3, m_drop]).
 
@@ -76,7 +79,7 @@ build_db_state_drop_column_test() ->
     meck:expect(m_dropcol, up, fun() ->
         [{alter_table, <<"t">>, [{drop_column, old}]}]
     end),
-    State = kura_schema_diff:build_db_state([m_create4, m_dropcol]),
+    State = cols(kura_schema_diff:build_db_state([m_create4, m_dropcol])),
     Cols = maps:get(<<"t">>, State),
     ?assertEqual(1, length(Cols)),
     ?assertEqual(id, (hd(Cols))#kura_column.name),
@@ -91,7 +94,7 @@ build_db_state_skips_index_ops_test() ->
             {execute, <<"SELECT 1">>}
         ]
     end),
-    State = kura_schema_diff:build_db_state([m_idx]),
+    State = cols(kura_schema_diff:build_db_state([m_idx])),
     ?assertEqual(1, length(maps:get(<<"t">>, State))),
     meck:unload(m_idx).
 
@@ -109,7 +112,7 @@ build_db_state_rename_column_test() ->
     meck:expect(m_rc_rename, up, fun() ->
         [{alter_table, <<"t">>, [{rename_column, old_name, new_name}]}]
     end),
-    State = kura_schema_diff:build_db_state([m_rc_create, m_rc_rename]),
+    State = cols(kura_schema_diff:build_db_state([m_rc_create, m_rc_rename])),
     Cols = maps:get(<<"t">>, State),
     Names = [C#kura_column.name || C <- Cols],
     ?assert(lists:member(new_name, Names)),
@@ -130,7 +133,7 @@ build_db_state_modify_column_test() ->
     meck:expect(m_mc_modify, up, fun() ->
         [{alter_table, <<"t">>, [{modify_column, age, float}]}]
     end),
-    State = kura_schema_diff:build_db_state([m_mc_create, m_mc_modify]),
+    State = cols(kura_schema_diff:build_db_state([m_mc_create, m_mc_modify])),
     [_, AgeCol] = maps:get(<<"t">>, State),
     ?assertEqual(float, AgeCol#kura_column.type),
     meck:unload([m_mc_create, m_mc_modify]).
@@ -146,7 +149,7 @@ build_db_state_multiple_tables_test() ->
             ]}
         ]
     end),
-    State = kura_schema_diff:build_db_state([m_multi]),
+    State = cols(kura_schema_diff:build_db_state([m_multi])),
     ?assertEqual(2, maps:size(State)),
     ?assertEqual(1, length(maps:get(<<"users">>, State))),
     ?assertEqual(2, length(maps:get(<<"posts">>, State))),
@@ -165,7 +168,7 @@ build_db_state_multiple_alters_same_table_test() ->
     meck:expect(m_mac_alter2, up, fun() ->
         [{alter_table, <<"t">>, [{add_column, #kura_column{name = b, type = integer}}]}]
     end),
-    State = kura_schema_diff:build_db_state([m_maa_create, m_mab_alter1, m_mac_alter2]),
+    State = cols(kura_schema_diff:build_db_state([m_maa_create, m_mab_alter1, m_mac_alter2])),
     Cols = maps:get(<<"t">>, State),
     ?assertEqual(3, length(Cols)),
     meck:unload([m_maa_create, m_mab_alter1, m_mac_alter2]).
@@ -176,7 +179,7 @@ build_db_state_alter_nonexistent_table_test() ->
     meck:expect(m_ghost, up, fun() ->
         [{alter_table, <<"ghost">>, [{add_column, #kura_column{name = x, type = string}}]}]
     end),
-    State = kura_schema_diff:build_db_state([m_ghost]),
+    State = cols(kura_schema_diff:build_db_state([m_ghost])),
     ?assertEqual([#kura_column{name = x, type = string}], maps:get(<<"ghost">>, State)),
     meck:unload(m_ghost).
 
@@ -194,7 +197,7 @@ build_desired_state_test() ->
             #kura_field{name = display, type = string, virtual = true}
         ]
     end),
-    State = kura_schema_diff:build_desired_state([test_schema]),
+    State = cols(kura_schema_diff:build_desired_state([test_schema])),
     Cols = maps:get(<<"users">>, State),
     %% Virtual field excluded
     ?assertEqual(2, length(Cols)),
@@ -203,7 +206,7 @@ build_desired_state_test() ->
     meck:unload(test_schema).
 
 build_desired_state_empty_test() ->
-    ?assertEqual(#{}, kura_schema_diff:build_desired_state([])).
+    ?assertEqual(#{columns => #{}, indexes => #{}}, kura_schema_diff:build_desired_state([])).
 
 build_desired_state_multiple_schemas_test() ->
     meck:new(schema_a, [non_strict]),
@@ -214,7 +217,7 @@ build_desired_state_multiple_schemas_test() ->
     meck:expect(schema_b, fields, fun() ->
         [#kura_field{name = id, type = id}, #kura_field{name = x, type = string}]
     end),
-    State = kura_schema_diff:build_desired_state([schema_a, schema_b]),
+    State = cols(kura_schema_diff:build_desired_state([schema_a, schema_b])),
     ?assertEqual(2, maps:size(State)),
     ?assertEqual(1, length(maps:get(<<"a">>, State))),
     ?assertEqual(2, length(maps:get(<<"b">>, State))),
@@ -229,7 +232,7 @@ build_desired_state_all_virtual_test() ->
             #kura_field{name = y, type = integer, virtual = true}
         ]
     end),
-    State = kura_schema_diff:build_desired_state([schema_virt]),
+    State = cols(kura_schema_diff:build_desired_state([schema_virt])),
     ?assertEqual([], maps:get(<<"v">>, State)),
     meck:unload(schema_virt).
 
@@ -239,7 +242,7 @@ build_desired_state_preserves_defaults_test() ->
     meck:expect(schema_def, fields, fun() ->
         [#kura_field{name = active, type = boolean, default = true}]
     end),
-    State = kura_schema_diff:build_desired_state([schema_def]),
+    State = cols(kura_schema_diff:build_desired_state([schema_def])),
     [Col] = maps:get(<<"t">>, State),
     ?assertEqual(true, Col#kura_column.default),
     meck:unload(schema_def).
@@ -490,7 +493,7 @@ build_db_state_nullable_replay_test() ->
     meck:expect(m_nrb_alter, up, fun() ->
         [{execute, <<"ALTER TABLE \"t\" ALTER COLUMN \"name\" SET NOT NULL">>}]
     end),
-    State = kura_schema_diff:build_db_state([m_nra_create, m_nrb_alter]),
+    State = cols(kura_schema_diff:build_db_state([m_nra_create, m_nrb_alter])),
     [_, NameCol] = maps:get(<<"t">>, State),
     ?assertEqual(false, NameCol#kura_column.nullable),
     meck:unload([m_nra_create, m_nrb_alter]).
@@ -508,7 +511,7 @@ build_db_state_default_replay_test() ->
     meck:expect(m_drb_alter, up, fun() ->
         [{execute, <<"ALTER TABLE \"t\" ALTER COLUMN \"active\" SET DEFAULT true">>}]
     end),
-    State = kura_schema_diff:build_db_state([m_dra_create, m_drb_alter]),
+    State = cols(kura_schema_diff:build_db_state([m_dra_create, m_drb_alter])),
     [Col] = maps:get(<<"t">>, State),
     ?assertEqual(true, Col#kura_column.default),
     meck:unload([m_dra_create, m_drb_alter]).
@@ -602,7 +605,7 @@ build_desired_state_belongs_to_enrichment_test() ->
     meck:expect(bt_post, associations, fun() ->
         [#kura_assoc{name = user, type = belongs_to, schema = bt_user, foreign_key = user_id}]
     end),
-    State = kura_schema_diff:build_desired_state([bt_post]),
+    State = cols(kura_schema_diff:build_desired_state([bt_post])),
     [_, FkCol] = maps:get(<<"posts">>, State),
     ?assertEqual({<<"users">>, id}, FkCol#kura_column.references),
     ?assertEqual(no_action, FkCol#kura_column.on_delete),
@@ -614,7 +617,7 @@ build_desired_state_no_associations_callback_test() ->
     meck:expect(na_schema, fields, fun() ->
         [#kura_field{name = id, type = id, primary_key = true}]
     end),
-    State = kura_schema_diff:build_desired_state([na_schema]),
+    State = cols(kura_schema_diff:build_desired_state([na_schema])),
     [Col] = maps:get(<<"items">>, State),
     ?assertEqual(undefined, Col#kura_column.references),
     meck:unload(na_schema).
@@ -635,7 +638,7 @@ build_desired_state_target_schema_unavailable_test() ->
             }
         ]
     end),
-    State = kura_schema_diff:build_desired_state([ts_post]),
+    State = cols(kura_schema_diff:build_desired_state([ts_post])),
     [_, FkCol] = maps:get(<<"posts">>, State),
     %% Should gracefully skip - no references set
     ?assertEqual(undefined, FkCol#kura_column.references),
@@ -712,6 +715,169 @@ full_roundtrip_add_field_test() ->
     ),
     ?assertMatch([{alter_table, <<"items">>, [{drop_column, desc}]}], Down),
     meck:unload([rt_mig2, rt_schema3]).
+
+%%====================================================================
+%% Index tests
+%%====================================================================
+
+build_db_state_tracks_indexes_test() ->
+    meck:new(m_idx2, [non_strict]),
+    meck:expect(m_idx2, up, fun() ->
+        [
+            {create_table, <<"users">>, [
+                #kura_column{name = id, type = id},
+                #kura_column{name = email, type = string}
+            ]},
+            {create_index, <<"users">>, [email], #{unique => true}}
+        ]
+    end),
+    State = kura_schema_diff:build_db_state([m_idx2]),
+    IdxState = idxs(State),
+    ?assertEqual([{[email], #{unique => true}}], maps:get(<<"users">>, IdxState)),
+    meck:unload(m_idx2).
+
+build_db_state_tracks_5tuple_indexes_test() ->
+    meck:new(m_idx5, [non_strict]),
+    meck:expect(m_idx5, up, fun() ->
+        [
+            {create_table, <<"t">>, [#kura_column{name = id, type = id}]},
+            {create_index, <<"t_id_index">>, <<"t">>, [id], [unique]}
+        ]
+    end),
+    State = kura_schema_diff:build_db_state([m_idx5]),
+    IdxState = idxs(State),
+    ?assertEqual([{[id], #{unique => true}}], maps:get(<<"t">>, IdxState)),
+    meck:unload(m_idx5).
+
+build_db_state_drop_index_test() ->
+    meck:new(m_idx_create, [non_strict]),
+    meck:new(m_idx_drop, [non_strict]),
+    meck:expect(m_idx_create, up, fun() ->
+        [
+            {create_table, <<"t">>, [#kura_column{name = id, type = id}]},
+            {create_index, <<"t">>, [id], #{unique => true}}
+        ]
+    end),
+    meck:expect(m_idx_drop, up, fun() ->
+        [{drop_index, <<"t_id_index">>}]
+    end),
+    State = kura_schema_diff:build_db_state([m_idx_create, m_idx_drop]),
+    ?assertEqual([], maps:get(<<"t">>, idxs(State), [])),
+    meck:unload([m_idx_create, m_idx_drop]).
+
+build_desired_state_extracts_indexes_test() ->
+    meck:new(idx_schema, [non_strict]),
+    meck:expect(idx_schema, table, fun() -> <<"users">> end),
+    meck:expect(idx_schema, fields, fun() ->
+        [
+            #kura_field{name = id, type = id, primary_key = true},
+            #kura_field{name = email, type = string}
+        ]
+    end),
+    meck:expect(idx_schema, indexes, fun() ->
+        [{[email], #{unique => true}}, {[id], #{}}]
+    end),
+    State = kura_schema_diff:build_desired_state([idx_schema]),
+    IdxState = idxs(State),
+    ?assertEqual([{[email], #{unique => true}}, {[id], #{}}], maps:get(<<"users">>, IdxState)),
+    meck:unload(idx_schema).
+
+build_desired_state_no_indexes_callback_test() ->
+    meck:new(no_idx_schema, [non_strict]),
+    meck:expect(no_idx_schema, table, fun() -> <<"t">> end),
+    meck:expect(no_idx_schema, fields, fun() ->
+        [#kura_field{name = id, type = id}]
+    end),
+    State = kura_schema_diff:build_desired_state([no_idx_schema]),
+    ?assertEqual([], maps:get(<<"t">>, idxs(State))),
+    meck:unload(no_idx_schema).
+
+diff_new_index_test() ->
+    Db = #{columns => #{<<"t">> => [#kura_column{name = id, type = id}]}, indexes => #{}},
+    Desired = #{
+        columns => #{<<"t">> => [#kura_column{name = id, type = id}]},
+        indexes => #{<<"t">> => [{[id], #{unique => true}}]}
+    },
+    {Up, Down} = kura_schema_diff:diff(Db, Desired),
+    ?assertMatch([{create_index, <<"t">>, [id], #{unique := true}}], Up),
+    ?assertMatch([{drop_index, <<"t_id_index">>}], Down).
+
+diff_drop_index_test() ->
+    Db = #{
+        columns => #{<<"t">> => [#kura_column{name = id, type = id}]},
+        indexes => #{<<"t">> => [{[id], #{unique => true}}]}
+    },
+    Desired = #{
+        columns => #{<<"t">> => [#kura_column{name = id, type = id}]},
+        indexes => #{<<"t">> => []}
+    },
+    {Up, Down} = kura_schema_diff:diff(Db, Desired),
+    ?assertMatch([{drop_index, <<"t_id_index">>}], Up),
+    ?assertMatch([{create_index, <<"t">>, [id], #{unique := true}}], Down).
+
+diff_no_index_changes_test() ->
+    Db = #{
+        columns => #{<<"t">> => [#kura_column{name = id, type = id}]},
+        indexes => #{<<"t">> => [{[id], #{unique => true}}]}
+    },
+    Desired = #{
+        columns => #{<<"t">> => [#kura_column{name = id, type = id}]},
+        indexes => #{<<"t">> => [{[id], #{unique => true}}]}
+    },
+    ?assertEqual({[], []}, kura_schema_diff:diff(Db, Desired)).
+
+diff_new_table_with_indexes_test() ->
+    meck:new(new_idx_schema, [non_strict]),
+    meck:expect(new_idx_schema, table, fun() -> <<"users">> end),
+    meck:expect(new_idx_schema, fields, fun() ->
+        [
+            #kura_field{name = id, type = id, primary_key = true},
+            #kura_field{name = email, type = string}
+        ]
+    end),
+    meck:expect(new_idx_schema, indexes, fun() ->
+        [{[email], #{unique => true}}]
+    end),
+    DbState = kura_schema_diff:build_db_state([]),
+    DesiredState = kura_schema_diff:build_desired_state([new_idx_schema]),
+    {Up, Down} = kura_schema_diff:diff(DbState, DesiredState),
+    ?assert(
+        lists:any(
+            fun
+                ({create_table, <<"users">>, _}) -> true;
+                (_) -> false
+            end,
+            Up
+        )
+    ),
+    ?assert(
+        lists:any(
+            fun
+                ({create_index, <<"users">>, [email], _}) -> true;
+                (_) -> false
+            end,
+            Up
+        )
+    ),
+    ?assert(
+        lists:any(
+            fun
+                ({drop_table, <<"users">>}) -> true;
+                (_) -> false
+            end,
+            Down
+        )
+    ),
+    ?assert(
+        lists:any(
+            fun
+                ({drop_index, _}) -> true;
+                (_) -> false
+            end,
+            Down
+        )
+    ),
+    meck:unload(new_idx_schema).
 
 %%====================================================================
 %% Helpers

@@ -9,11 +9,16 @@
     field_to_column/1
 ]).
 
--type db_state() :: #{binary() => [#kura_column{}]}.
+-type col_state() :: #{binary() => [#kura_column{}]}.
+-type index_entry() :: {[atom()], map()}.
+-type index_state() :: #{binary() => [index_entry()]}.
+-type db_state() :: #{columns => col_state(), indexes => index_state()}.
 -type operation() ::
     {create_table, binary(), [#kura_column{}]}
     | {drop_table, binary()}
     | {alter_table, binary(), [alter_op()]}
+    | {create_index, binary(), [atom()], map()}
+    | {drop_index, binary()}
     | {execute, binary()}.
 -type alter_op() ::
     {add_column, #kura_column{}}
@@ -37,33 +42,52 @@ build_db_state(MigModules) ->
             Ops = Mod:up(),
             apply_ops(Ops, Acc)
         end,
-        #{},
+        #{columns => #{}, indexes => #{}},
         Sorted
     ).
 
-%% Convert schema modules to desired column state
+%% Convert schema modules to desired state (columns + indexes)
 -spec build_desired_state([module()]) -> db_state().
 build_desired_state(SchemaModules) ->
     lists:foldl(
-        fun(Mod, Acc) ->
+        fun(Mod, #{columns := ColAcc, indexes := IdxAcc} = _Acc) ->
             Table = Mod:table(),
             Fields = Mod:fields(),
             Columns = [field_to_column(F) || F <- Fields, F#kura_field.virtual =/= true],
             Enriched = enrich_with_associations(Mod, Columns),
-            Acc#{Table => Enriched}
+            Indexes = extract_indexes(Mod),
+            #{columns => ColAcc#{Table => Enriched}, indexes => IdxAcc#{Table => Indexes}}
         end,
-        #{},
+        #{columns => #{}, indexes => #{}},
         SchemaModules
     ).
+
+-spec extract_indexes(module()) -> [index_entry()].
+extract_indexes(Mod) ->
+    case erlang:function_exported(Mod, indexes, 0) of
+        false ->
+            [];
+        true ->
+            try
+                Mod:indexes()
+            catch
+                _:_ -> []
+            end
+    end.
 
 %% Diff DB state against desired state, returning {UpOps, DownOps}
 -spec diff(db_state(), db_state()) -> {[operation()], [operation()]}.
 diff(DbState, DesiredState) ->
+    DbCols = maps:get(columns, ensure_structured(DbState), #{}),
+    DesiredCols = maps:get(columns, ensure_structured(DesiredState), #{}),
+    DbIdx = maps:get(indexes, ensure_structured(DbState), #{}),
+    DesiredIdx = maps:get(indexes, ensure_structured(DesiredState), #{}),
+
     %% New tables: in desired but not in DB
-    NewTables = maps:keys(DesiredState) -- maps:keys(DbState),
+    NewTables = maps:keys(DesiredCols) -- maps:keys(DbCols),
     {CreateUp, CreateDown} = lists:foldl(
         fun(Table, {UpAcc, DownAcc}) ->
-            Cols = maps:get(Table, DesiredState),
+            Cols = maps:get(Table, DesiredCols),
             {UpAcc ++ [{create_table, Table, Cols}], DownAcc ++ [{drop_table, Table}]}
         end,
         {[], []},
@@ -71,12 +95,12 @@ diff(DbState, DesiredState) ->
     ),
 
     %% Existing tables: diff columns
-    ExistingTables = maps:keys(DesiredState) -- NewTables,
+    ExistingTables = maps:keys(DesiredCols) -- NewTables,
     {AlterUp, AlterDown, ExecUp, ExecDown} = lists:foldl(
         fun(Table, {AUpAcc, ADownAcc, EUpAcc, EDownAcc}) ->
-            DbCols = maps:get(Table, DbState, []),
-            DesiredCols = maps:get(Table, DesiredState),
-            case diff_columns(Table, DbCols, DesiredCols) of
+            DbTableCols = maps:get(Table, DbCols, []),
+            DesiredTableCols = maps:get(Table, DesiredCols),
+            case diff_columns(Table, DbTableCols, DesiredTableCols) of
                 {[], [], [], []} ->
                     {AUpAcc, ADownAcc, EUpAcc, EDownAcc};
                 {ColUp, ColDown, EU, ED} ->
@@ -97,7 +121,20 @@ diff(DbState, DesiredState) ->
         lists:sort(ExistingTables)
     ),
 
-    {CreateUp ++ AlterUp ++ ExecUp, CreateDown ++ AlterDown ++ ExecDown}.
+    %% Index diffing: all tables (new + existing)
+    AllDesiredTables = maps:keys(DesiredCols),
+    {IdxUp, IdxDown} = lists:foldl(
+        fun(Table, {IUpAcc, IDownAcc}) ->
+            DbTableIdx = maps:get(Table, DbIdx, []),
+            DesiredTableIdx = maps:get(Table, DesiredIdx, []),
+            {IU, ID} = diff_indexes(Table, DbTableIdx, DesiredTableIdx),
+            {IUpAcc ++ IU, IDownAcc ++ ID}
+        end,
+        {[], []},
+        lists:sort(AllDesiredTables)
+    ),
+
+    {CreateUp ++ AlterUp ++ ExecUp ++ IdxUp, CreateDown ++ AlterDown ++ ExecDown ++ IdxDown}.
 
 %% Convert a kura_field to a kura_column (skipping virtual fields)
 -spec field_to_column(#kura_field{}) -> #kura_column{}.
@@ -161,19 +198,61 @@ find_primary_key(Fields) ->
 
 apply_ops([], State) ->
     State;
-apply_ops([{create_table, Name, Cols} | Rest], State) ->
-    apply_ops(Rest, State#{Name => Cols});
-apply_ops([{drop_table, Name} | Rest], State) ->
-    apply_ops(Rest, maps:remove(Name, State));
-apply_ops([{alter_table, Name, AlterOps} | Rest], State) ->
-    Cols = maps:get(Name, State, []),
+apply_ops([{create_table, Name, Cols} | Rest], #{columns := ColState} = State) ->
+    apply_ops(Rest, State#{columns => ColState#{Name => Cols}});
+apply_ops([{drop_table, Name} | Rest], #{columns := ColState, indexes := IdxState} = State) ->
+    apply_ops(Rest, State#{
+        columns => maps:remove(Name, ColState),
+        indexes => maps:remove(Name, IdxState)
+    });
+apply_ops([{alter_table, Name, AlterOps} | Rest], #{columns := ColState} = State) ->
+    Cols = maps:get(Name, ColState, []),
     NewCols = apply_alter_ops(AlterOps, Cols),
-    apply_ops(Rest, State#{Name => NewCols});
-apply_ops([{execute, SQL} | Rest], State) ->
-    apply_ops(Rest, try_apply_execute(SQL, State));
+    apply_ops(Rest, State#{columns => ColState#{Name => NewCols}});
+apply_ops([{create_index, Table, Columns, Opts} | Rest], #{indexes := IdxState} = State) ->
+    TableIdx = maps:get(Table, IdxState, []),
+    Entry = {Columns, Opts},
+    apply_ops(Rest, State#{indexes => IdxState#{Table => TableIdx ++ [Entry]}});
+apply_ops([{create_index, _Name, Table, Columns, Opts} | Rest], #{indexes := IdxState} = State) ->
+    TableIdx = maps:get(Table, IdxState, []),
+    OptsMap = proplist_to_map(Opts),
+    Entry = {Columns, OptsMap},
+    apply_ops(Rest, State#{indexes => IdxState#{Table => TableIdx ++ [Entry]}});
+apply_ops([{drop_index, IdxName} | Rest], #{indexes := IdxState} = State) ->
+    %% Find and remove the index by its generated name
+    NewIdxState = maps:map(
+        fun(Table, Entries) ->
+            [E || {Cols, _} = E <- Entries, index_name(Table, Cols) =/= IdxName]
+        end,
+        IdxState
+    ),
+    apply_ops(Rest, State#{indexes => NewIdxState});
+apply_ops([{execute, SQL} | Rest], #{columns := ColState} = State) ->
+    apply_ops(Rest, State#{columns => try_apply_execute(SQL, ColState)});
 apply_ops([_Other | Rest], State) ->
-    %% Skip create_index, drop_index, etc.
     apply_ops(Rest, State).
+
+%% Convert legacy flat map format to structured format
+-spec ensure_structured(map()) -> db_state().
+ensure_structured(#{columns := _} = State) -> State;
+ensure_structured(FlatMap) -> #{columns => FlatMap, indexes => #{}}.
+
+-spec index_name(binary(), [atom()]) -> binary().
+index_name(Table, Cols) ->
+    ColsBin = lists:join(~"_", [atom_to_binary(C, utf8) || C <- Cols]),
+    iolist_to_binary([Table, ~"_", ColsBin, ~"_index"]).
+
+-spec proplist_to_map([atom() | {atom(), term()}]) -> map().
+proplist_to_map(Opts) ->
+    lists:foldl(
+        fun
+            (unique, Acc) -> Acc#{unique => true};
+            ({K, V}, Acc) -> Acc#{K => V};
+            (_, Acc) -> Acc
+        end,
+        #{},
+        Opts
+    ).
 
 apply_alter_ops([], Cols) ->
     Cols;
@@ -201,6 +280,28 @@ apply_alter_ops([{modify_column, Name, Type} | Rest], Cols) ->
     apply_alter_ops(Rest, NewCols);
 apply_alter_ops([_Other | Rest], Cols) ->
     apply_alter_ops(Rest, Cols).
+
+diff_indexes(Table, DbIndexes, DesiredIndexes) ->
+    %% Normalize to sets of {Columns, Opts} for comparison
+    DbSet = normalize_indexes(DbIndexes),
+    DesiredSet = normalize_indexes(DesiredIndexes),
+    %% New indexes: in desired but not in DB
+    NewIdx = DesiredSet -- DbSet,
+    CreateUp = [{create_index, Table, Cols, Opts} || {Cols, Opts} <- NewIdx],
+    CreateDown = [{drop_index, index_name(Table, Cols)} || {Cols, _} <- NewIdx],
+    %% Dropped indexes: in DB but not in desired
+    DroppedIdx = DbSet -- DesiredSet,
+    DropUp = [{drop_index, index_name(Table, Cols)} || {Cols, _} <- DroppedIdx],
+    DropDown = [{create_index, Table, Cols, Opts} || {Cols, Opts} <- DroppedIdx],
+    {CreateUp ++ DropUp, CreateDown ++ DropDown}.
+
+normalize_indexes(Indexes) ->
+    [{lists:sort(Cols), normalize_opts(Opts)} || {Cols, Opts} <- Indexes].
+
+normalize_opts(Opts) when is_map(Opts) ->
+    maps:without([name], Opts);
+normalize_opts(Opts) when is_list(Opts) ->
+    proplist_to_map(Opts).
 
 diff_columns(Table, DbCols, DesiredCols) ->
     DbMap = col_map(DbCols),
@@ -318,6 +419,7 @@ col_map(Cols) ->
     maps:from_list([{C#kura_column.name, C} || C <- Cols]).
 
 %% Parse known SQL patterns from {execute, SQL} ops to update column state
+-spec try_apply_execute(binary(), col_state()) -> col_state().
 try_apply_execute(SQL, State) ->
     case
         re:run(
