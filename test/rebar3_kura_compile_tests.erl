@@ -204,13 +204,16 @@ cleanup_mod(Mod) ->
 render_migration(ModName, UpOps, DownOps) ->
     io_lib:format(
         "-module(~s).~n"
+        "-moduledoc false.~n"
         "-behaviour(kura_migration).~n"
         "-include_lib(\"kura/include/kura.hrl\").~n"
         "-export([up/0, down/0]).~n"
         "~n"
+        "-spec up() -> [kura_migration:operation()].~n"
         "up() ->~n"
         "    ~s.~n"
         "~n"
+        "-spec down() -> [kura_migration:operation()].~n"
         "down() ->~n"
         "    ~s.~n",
         [ModName, render_ops(UpOps), render_ops(DownOps)]
@@ -222,15 +225,15 @@ render_ops(Ops) ->
 
 render_op({create_table, Table, Cols}) ->
     ColStrs = lists:join(",\n        ", [render_column(C) || C <- Cols]),
-    io_lib:format("{create_table, <<\"~s\">>, [~n        ~s~n    ]}", [Table, ColStrs]);
+    io_lib:format("{create_table, ~~\"~s\", [~n        ~s~n    ]}", [Table, ColStrs]);
 render_op({drop_table, Table}) ->
-    io_lib:format("{drop_table, <<\"~s\">>}", [Table]);
+    io_lib:format("{drop_table, ~~\"~s\"}", [Table]);
 render_op({alter_table, Table, AlterOps}) ->
     OpStrs = lists:join(",\n        ", [render_alter_op(Op) || Op <- AlterOps]),
-    io_lib:format("{alter_table, <<\"~s\">>, [~n        ~s~n    ]}", [Table, OpStrs]);
+    io_lib:format("{alter_table, ~~\"~s\", [~n        ~s~n    ]}", [Table, OpStrs]);
 render_op({execute, SQL}) ->
     Escaped = string:replace(binary_to_list(SQL), "\"", "\\\"", all),
-    io_lib:format("{execute, <<\"~s\">>}", [Escaped]).
+    io_lib:format("{execute, ~~\"~s\"}", [Escaped]).
 
 render_alter_op({add_column, Col}) ->
     io_lib:format("{add_column, ~s}", [render_column(Col)]);
@@ -269,8 +272,12 @@ render_column(#kura_column{
         end,
     Parts5 =
         case Refs of
-            undefined -> Parts4;
-            _ -> Parts4 ++ [io_lib:format("references = ~p", [Refs])]
+            undefined ->
+                Parts4;
+            {RefTable, RefCol} ->
+                Parts4 ++ [io_lib:format("references = {~~\"~s\", ~p}", [RefTable, RefCol])];
+            _ ->
+                Parts4 ++ [io_lib:format("references = ~p", [Refs])]
         end,
     Parts6 =
         case OnDel of
