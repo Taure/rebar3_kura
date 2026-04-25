@@ -880,6 +880,364 @@ diff_new_table_with_indexes_test() ->
     meck:unload(new_idx_schema).
 
 %%====================================================================
+%% Regression: schema declares an index that no migration creates
+%%====================================================================
+%%
+%% Scenario from production (asobi): the schema's `indexes/0` declared
+%% a unique index that's referenced by name in an `on_conflict` clause,
+%% but the table-creating migration never emitted a `create_index` op.
+%% `rebar3 kura compile` reported "schemas up to date" and downstream
+%% upserts failed with `constraint "..." does not exist`.
+%%
+%% These tests pin the diff/3 contract for that case end-to-end:
+%% - existing migration creates the table, no index op
+%% - schema declares one or more indexes via `indexes/0`
+%% - diff must emit `{create_index, ...}` ops (and matching downs)
+%%
+%% Coverage spans: single missing index, multiple missing indexes,
+%% mixed existing+missing indexes, multi-column index, idempotency
+%% after the generated migration is replayed.
+
+diff_schema_declares_index_missing_from_migration_test() ->
+    %% The classic asobi case: zone_snapshots table created without
+    %% the unique index that the schema declares.
+    meck:new(m_create_zs, [non_strict]),
+    meck:expect(m_create_zs, up, fun() ->
+        [
+            {create_table, <<"zone_snapshots">>, [
+                #kura_column{name = id, type = uuid, primary_key = true},
+                #kura_column{name = world_id, type = uuid, nullable = false},
+                #kura_column{name = zone_x, type = integer, nullable = false},
+                #kura_column{name = zone_y, type = integer, nullable = false}
+            ]}
+        ]
+    end),
+    meck:new(zs_schema, [non_strict]),
+    meck:expect(zs_schema, table, fun() -> <<"zone_snapshots">> end),
+    meck:expect(zs_schema, fields, fun() ->
+        [
+            #kura_field{name = id, type = uuid, primary_key = true},
+            #kura_field{name = world_id, type = uuid, nullable = false},
+            #kura_field{name = zone_x, type = integer, nullable = false},
+            #kura_field{name = zone_y, type = integer, nullable = false}
+        ]
+    end),
+    meck:expect(zs_schema, indexes, fun() ->
+        [{[world_id, zone_x, zone_y], #{unique => true}}]
+    end),
+
+    DbState = kura_schema_diff:build_db_state([m_create_zs]),
+    DesiredState = kura_schema_diff:build_desired_state([zs_schema]),
+    {Up, Down} = kura_schema_diff:diff(DbState, DesiredState),
+
+    %% No column-level diff: table is in sync.
+    ?assert(
+        not lists:any(
+            fun
+                ({create_table, _, _}) -> true;
+                ({alter_table, _, _}) -> true;
+                (_) -> false
+            end,
+            Up
+        )
+    ),
+    %% Index missing from DB state must surface as a create_index op.
+    ?assertMatch(
+        [{create_index, <<"zone_snapshots">>, [world_id, zone_x, zone_y], #{unique := true}}],
+        Up
+    ),
+    ?assertMatch(
+        [{drop_index, <<"zone_snapshots_world_id_zone_x_zone_y_index">>}],
+        Down
+    ),
+
+    meck:unload([m_create_zs, zs_schema]).
+
+diff_schema_declares_multiple_indexes_missing_test() ->
+    %% Two declared indexes, neither in any migration. Both must
+    %% appear in the up diff and both must have matching drops in the
+    %% down diff.
+    meck:new(m_create_users, [non_strict]),
+    meck:expect(m_create_users, up, fun() ->
+        [
+            {create_table, <<"users">>, [
+                #kura_column{name = id, type = id, primary_key = true},
+                #kura_column{name = email, type = string, nullable = false},
+                #kura_column{name = username, type = string, nullable = false}
+            ]}
+        ]
+    end),
+    meck:new(users_schema, [non_strict]),
+    meck:expect(users_schema, table, fun() -> <<"users">> end),
+    meck:expect(users_schema, fields, fun() ->
+        [
+            #kura_field{name = id, type = id, primary_key = true},
+            #kura_field{name = email, type = string, nullable = false},
+            #kura_field{name = username, type = string, nullable = false}
+        ]
+    end),
+    meck:expect(users_schema, indexes, fun() ->
+        [
+            {[email], #{unique => true}},
+            {[username], #{unique => true}}
+        ]
+    end),
+
+    DbState = kura_schema_diff:build_db_state([m_create_users]),
+    DesiredState = kura_schema_diff:build_desired_state([users_schema]),
+    {Up, _Down} = kura_schema_diff:diff(DbState, DesiredState),
+
+    CreateIndexOps = [Op || {create_index, _, _, _} = Op <- Up],
+    ?assertEqual(2, length(CreateIndexOps)),
+    ?assert(
+        lists:any(
+            fun
+                ({create_index, <<"users">>, [email], #{unique := true}}) -> true;
+                (_) -> false
+            end,
+            CreateIndexOps
+        )
+    ),
+    ?assert(
+        lists:any(
+            fun
+                ({create_index, <<"users">>, [username], #{unique := true}}) -> true;
+                (_) -> false
+            end,
+            CreateIndexOps
+        )
+    ),
+
+    meck:unload([m_create_users, users_schema]).
+
+diff_schema_declares_mixed_existing_and_missing_indexes_test() ->
+    %% One index already in migrations, one declared but missing. Only
+    %% the missing one is emitted — the existing one must NOT be
+    %% re-created (regression bait for the diff function double-counting).
+    meck:new(m_create_orders, [non_strict]),
+    meck:expect(m_create_orders, up, fun() ->
+        [
+            {create_table, <<"orders">>, [
+                #kura_column{name = id, type = id, primary_key = true},
+                #kura_column{name = customer_id, type = id, nullable = false},
+                #kura_column{name = status, type = string, nullable = false}
+            ]},
+            {create_index, <<"orders">>, [customer_id], #{}}
+        ]
+    end),
+    meck:new(orders_schema, [non_strict]),
+    meck:expect(orders_schema, table, fun() -> <<"orders">> end),
+    meck:expect(orders_schema, fields, fun() ->
+        [
+            #kura_field{name = id, type = id, primary_key = true},
+            #kura_field{name = customer_id, type = id, nullable = false},
+            #kura_field{name = status, type = string, nullable = false}
+        ]
+    end),
+    meck:expect(orders_schema, indexes, fun() ->
+        [
+            {[customer_id], #{}},
+            {[status], #{}}
+        ]
+    end),
+
+    DbState = kura_schema_diff:build_db_state([m_create_orders]),
+    DesiredState = kura_schema_diff:build_desired_state([orders_schema]),
+    {Up, _Down} = kura_schema_diff:diff(DbState, DesiredState),
+
+    CreateIndexOps = [Op || {create_index, _, _, _} = Op <- Up],
+    ?assertEqual(1, length(CreateIndexOps)),
+    ?assertMatch([{create_index, <<"orders">>, [status], _}], CreateIndexOps),
+    %% Make sure customer_id is NOT in the up diff
+    ?assertNot(
+        lists:any(
+            fun
+                ({create_index, <<"orders">>, [customer_id], _}) -> true;
+                (_) -> false
+            end,
+            Up
+        )
+    ),
+
+    meck:unload([m_create_orders, orders_schema]).
+
+diff_schema_idempotent_after_index_migration_replay_test() ->
+    %% After the generator emits a create_index op and that op is
+    %% replayed as a follow-up migration, the next diff must be empty.
+    %% This is the idempotency property the user actually observes —
+    %% if it fails the user sees `kura compile` re-emit the same
+    %% migration on every run.
+    meck:new(m_create_pets, [non_strict]),
+    meck:expect(m_create_pets, up, fun() ->
+        [
+            {create_table, <<"pets">>, [
+                #kura_column{name = id, type = id, primary_key = true},
+                #kura_column{name = owner_id, type = id, nullable = false}
+            ]}
+        ]
+    end),
+    %% Simulate the migration the generator would emit.
+    meck:new(m_add_index_pets_owner, [non_strict]),
+    meck:expect(m_add_index_pets_owner, up, fun() ->
+        [{create_index, <<"pets">>, [owner_id], #{}}]
+    end),
+    meck:new(pets_schema, [non_strict]),
+    meck:expect(pets_schema, table, fun() -> <<"pets">> end),
+    meck:expect(pets_schema, fields, fun() ->
+        [
+            #kura_field{name = id, type = id, primary_key = true},
+            #kura_field{name = owner_id, type = id, nullable = false}
+        ]
+    end),
+    meck:expect(pets_schema, indexes, fun() ->
+        [{[owner_id], #{}}]
+    end),
+
+    %% Before the index migration: diff emits create_index.
+    DbBefore = kura_schema_diff:build_db_state([m_create_pets]),
+    Desired = kura_schema_diff:build_desired_state([pets_schema]),
+    {UpBefore, _DownBefore} = kura_schema_diff:diff(DbBefore, Desired),
+    ?assertMatch([{create_index, <<"pets">>, [owner_id], _}], UpBefore),
+
+    %% After the index migration is replayed: diff is empty.
+    DbAfter = kura_schema_diff:build_db_state([m_create_pets, m_add_index_pets_owner]),
+    ?assertEqual({[], []}, kura_schema_diff:diff(DbAfter, Desired)),
+
+    meck:unload([m_create_pets, m_add_index_pets_owner, pets_schema]).
+
+diff_schema_index_column_order_is_preserved_test() ->
+    %% B-tree indexes on (a, b) and (b, a) are different — they serve
+    %% different query patterns and produce different generated names
+    %% (`t_a_b_index` vs `t_b_a_index`). Earlier diff code sorted the
+    %% column list before comparing, which silently coerced the emitted
+    %% op to alphabetic order. The asobi case happened to work by
+    %% coincidence (world_id, zone_x, zone_y already in alpha order),
+    %% but a schema declaring `[zone_y, zone_x, world_id]` would have
+    %% had its index renamed and broken the `on_conflict` clause that
+    %% references the original constraint name.
+    meck:new(m_create_t, [non_strict]),
+    meck:expect(m_create_t, up, fun() ->
+        [
+            {create_table, <<"t">>, [
+                #kura_column{name = a, type = string},
+                #kura_column{name = b, type = string}
+            ]}
+        ]
+    end),
+    meck:new(t_schema_ba, [non_strict]),
+    meck:expect(t_schema_ba, table, fun() -> <<"t">> end),
+    meck:expect(t_schema_ba, fields, fun() ->
+        [
+            #kura_field{name = a, type = string},
+            #kura_field{name = b, type = string}
+        ]
+    end),
+    meck:expect(t_schema_ba, indexes, fun() ->
+        [{[b, a], #{}}]
+    end),
+
+    DbState = kura_schema_diff:build_db_state([m_create_t]),
+    DesiredState = kura_schema_diff:build_desired_state([t_schema_ba]),
+    {Up, Down} = kura_schema_diff:diff(DbState, DesiredState),
+
+    %% Column order must round-trip exactly as declared.
+    ?assertMatch([{create_index, <<"t">>, [b, a], _}], Up),
+    ?assertMatch([{drop_index, <<"t_b_a_index">>}], Down),
+
+    meck:unload([m_create_t, t_schema_ba]).
+
+diff_schema_index_column_order_change_is_a_diff_test() ->
+    %% Symmetric guarantee: if a migration created index `(a, b)` and
+    %% the schema now declares `(b, a)`, the diff must emit BOTH a
+    %% drop (of the old) and a create (of the new). A regression that
+    %% silently treated those as equal would mask a real schema change.
+    meck:new(m_create_t2, [non_strict]),
+    meck:expect(m_create_t2, up, fun() ->
+        [
+            {create_table, <<"t">>, [
+                #kura_column{name = a, type = string},
+                #kura_column{name = b, type = string}
+            ]},
+            {create_index, <<"t">>, [a, b], #{}}
+        ]
+    end),
+    meck:new(t_schema_ba2, [non_strict]),
+    meck:expect(t_schema_ba2, table, fun() -> <<"t">> end),
+    meck:expect(t_schema_ba2, fields, fun() ->
+        [
+            #kura_field{name = a, type = string},
+            #kura_field{name = b, type = string}
+        ]
+    end),
+    meck:expect(t_schema_ba2, indexes, fun() ->
+        [{[b, a], #{}}]
+    end),
+
+    DbState = kura_schema_diff:build_db_state([m_create_t2]),
+    DesiredState = kura_schema_diff:build_desired_state([t_schema_ba2]),
+    {Up, _Down} = kura_schema_diff:diff(DbState, DesiredState),
+
+    HasDrop = lists:any(
+        fun
+            ({drop_index, <<"t_a_b_index">>}) -> true;
+            (_) -> false
+        end,
+        Up
+    ),
+    HasCreate = lists:any(
+        fun
+            ({create_index, <<"t">>, [b, a], _}) -> true;
+            (_) -> false
+        end,
+        Up
+    ),
+    ?assert(HasDrop),
+    ?assert(HasCreate),
+
+    meck:unload([m_create_t2, t_schema_ba2]).
+
+diff_schema_index_with_multi_column_keys_test() ->
+    %% Multi-column composite indexes round-trip through the diff.
+    meck:new(m_create_logs, [non_strict]),
+    meck:expect(m_create_logs, up, fun() ->
+        [
+            {create_table, <<"logs">>, [
+                #kura_column{name = id, type = id, primary_key = true},
+                #kura_column{name = tenant_id, type = id, nullable = false},
+                #kura_column{name = created_at, type = utc_datetime, nullable = false}
+            ]}
+        ]
+    end),
+    meck:new(logs_schema, [non_strict]),
+    meck:expect(logs_schema, table, fun() -> <<"logs">> end),
+    meck:expect(logs_schema, fields, fun() ->
+        [
+            #kura_field{name = id, type = id, primary_key = true},
+            #kura_field{name = tenant_id, type = id, nullable = false},
+            #kura_field{name = created_at, type = utc_datetime, nullable = false}
+        ]
+    end),
+    meck:expect(logs_schema, indexes, fun() ->
+        [{[tenant_id, created_at], #{}}]
+    end),
+
+    DbState = kura_schema_diff:build_db_state([m_create_logs]),
+    DesiredState = kura_schema_diff:build_desired_state([logs_schema]),
+    {Up, Down} = kura_schema_diff:diff(DbState, DesiredState),
+
+    ?assertMatch(
+        [{create_index, <<"logs">>, [tenant_id, created_at], _}],
+        Up
+    ),
+    %% Down emits drop_index using the conventional generated name.
+    ?assertMatch(
+        [{drop_index, <<"logs_tenant_id_created_at_index">>}],
+        Down
+    ),
+
+    meck:unload([m_create_logs, logs_schema]).
+
+%%====================================================================
 %% Helpers
 %%====================================================================
 

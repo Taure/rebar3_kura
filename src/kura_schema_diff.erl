@@ -296,7 +296,11 @@ diff_indexes(Table, DbIndexes, DesiredIndexes) ->
     {CreateUp ++ DropUp, CreateDown ++ DropDown}.
 
 normalize_indexes(Indexes) ->
-    [{lists:sort(Cols), normalize_opts(Opts)} || {Cols, Opts} <- Indexes].
+    %% Don't sort Cols: column order is part of the index identity.
+    %% B-tree indexes on (a, b) and (b, a) serve different query patterns
+    %% and produce different generated index names, so reordering would
+    %% silently mask a real schema change. Normalize options only.
+    [{Cols, normalize_opts(Opts)} || {Cols, Opts} <- Indexes].
 
 normalize_opts(Opts) when is_map(Opts) ->
     maps:without([name], Opts);
