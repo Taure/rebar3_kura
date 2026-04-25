@@ -3,6 +3,14 @@
 -behaviour(provider).
 
 -export([init/1, do/1, format_error/1]).
+-export([
+    ensure_kura_on_path/1,
+    find_schema_files/2,
+    find_migration_files/1,
+    compile_opts/1,
+    compile_all/3,
+    cleanup/1
+]).
 
 -include_lib("kura/include/kura.hrl").
 
