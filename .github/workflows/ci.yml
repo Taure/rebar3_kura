@@ -20,5 +20,5 @@ jobs:
       enable-sbom: true
       enable-coverage: true
       enable-audit: false
-      otp-version: '28'
-      otp-matrix: '["27", "28"]'
+      otp-version: '29'
+      otp-matrix: '["27", "28", "29"]'
