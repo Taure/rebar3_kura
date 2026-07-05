@@ -21,4 +21,4 @@ jobs:
       enable-coverage: true
       enable-audit: false
       otp-version: '29'
-      otp-matrix: '["27", "28", "29"]'
+      otp-matrix: '["28", "29"]'
