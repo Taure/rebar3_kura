@@ -8,7 +8,7 @@ Add the plugin to your `rebar.config`:
 
 ```erlang
 {project_plugins, [
-    {rebar3_kura, "~> 0.4"}
+    {rebar3_kura, "~> 0.14"}
 ]}.
 
 {provider_hooks, [
@@ -42,6 +42,41 @@ This will:
 3. Create the `src/migrations/` directory
 4. Check that the provider hook is configured
 5. Print remaining manual setup steps
+
+### `rebar3 kura check`
+
+CI gate. Fails the build if your `kura_schema` modules have drifted from the migration history, without generating any files. Pair it with `compile` (which does the fix).
+
+```
+$ rebar3 kura check     # exit 1 with a drift report, or 0 if clean
+```
+
+### `rebar3 kura gen_schemas`
+
+Bootstraps `kura_schema` modules from an existing PostgreSQL database (the `db pull` / `inspectdb` move). Introspects the catalog through your app's configured backend and emits schemas only, never migrations.
+
+```
+$ rebar3 kura gen_schemas
+$ rebar3 kura gen_schemas --force    # overwrite existing schema files
+$ rebar3 kura gen_schemas --strict   # abort on any unsupported column type
+```
+
+Catalog identifiers are allowlist-validated before codegen; unsupported types are skipped with a warning (or abort under `--strict`).
+
+### `rebar3 kura lint_migrations`
+
+CI gate that flags unsafe migration DDL (drop table/column, rename, in-place retype, `NOT NULL` without a default) before it reaches a running database. Runs kura's own unsafe-operation check over each migration's `up/0`.
+
+```
+$ rebar3 kura lint_migrations          # exit 1 on a finding, or 0 if clean
+$ rebar3 kura lint_migrations --warn   # report only, always exit 0
+```
+
+Honours each migration's optional `safe/0` callback as a per-operation opt-out.
+
+### `rebar3 kura gen_auth`
+
+Generates authentication schema and migration scaffolding for a new project.
 
 ## Auto-migration
 
