@@ -10,3 +10,4 @@ ebin/
 *~
 rebar.lock
 rebar3.crashdump
+erl_crash.dump
