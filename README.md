@@ -63,6 +63,17 @@ $ rebar3 kura gen_schemas --strict   # abort on any unsupported column type
 
 Catalog identifiers are allowlist-validated before codegen; unsupported types are skipped with a warning (or abort under `--strict`).
 
+**Baseline the existing schema.** After `gen_schemas`, a `rebar3 compile` generates `create_table` migrations for tables that already exist — applying them would fail. Baseline them once with `kura_migrator:fake(Repo)`, which records every pending migration as applied **without running its DDL**, then migrate for real from there:
+
+```erlang
+%% one-off, e.g. from `rebar3 shell` or a boot step
+kura_migrator:fake(my_app_repo).
+%% subsequent real migrations run normally
+kura_migrator:migrate(my_app_repo).
+```
+
+`fake` stamps *all* pending migrations, so only run it when every pending migration matches already-existing schema (check migration status first). Requires kura >= 2.18.
+
 ### `rebar3 kura lint_migrations`
 
 CI gate that flags unsafe migration DDL (drop table/column, rename, in-place retype, `NOT NULL` without a default) before it reaches a running database. Runs kura's own unsafe-operation check over each migration's `up/0`.
