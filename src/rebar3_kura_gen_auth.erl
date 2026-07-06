@@ -6,6 +6,7 @@
 -define(NAMESPACE, kura).
 -define(DEPS, [{default, app_discovery}]).
 
+-doc false.
 -spec init(rebar_state:t()) -> {ok, rebar_state:t()}.
 init(State) ->
     Provider = providers:create([
@@ -28,6 +29,7 @@ init(State) ->
     ]),
     {ok, rebar_state:add_provider(State, Provider)}.
 
+-doc false.
 -spec do(rebar_state:t()) -> {ok, rebar_state:t()} | {error, string()}.
 do(State) ->
     App =
@@ -49,6 +51,7 @@ do(State) ->
     print_instructions(AppName),
     {ok, State}.
 
+-doc false.
 -spec format_error(any()) -> iolist().
 format_error(Reason) ->
     io_lib:format("~p", [Reason]).
