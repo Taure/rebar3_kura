@@ -105,6 +105,33 @@ It does **not** auto-generate:
 - Default value changes
 - Primary key changes
 
+### Foreign keys from associations
+
+A `belongs_to` in `associations/0` generates the `REFERENCES` clause on the
+column it names. `on_delete` on the `#kura_assoc{}` is carried through, so a
+cascade rule needs no hand-written migration:
+
+```erlang
+associations() ->
+    [#kura_assoc{name = owner, type = belongs_to, schema = my_user,
+                 foreign_key = owner_id, on_delete = cascade}].
+```
+
+Omitting `on_delete` generates `ON DELETE NO ACTION`, as before.
+
+An association the generator cannot resolve aborts the run and names the
+schema, the association and the reason. It is never skipped: a dropped
+foreign key leaves the schema and the database disagreeing with nothing on
+stdout to say so. The named failures are an undeclared target, a target that
+will not load, a target that is not a schema module, a foreign key that is
+not a field on the owning schema, a composite foreign key (not supported by
+the generator - write that migration by hand), and an invalid or misplaced
+`on_delete`.
+
+Targets that live in a dependency resolve too - every dependency's and
+sibling app's `ebin` is added to the code path before the diff runs, which is
+what lets an extension application ship schemas the host references.
+
 ### Enum handling
 
 Enum fields (`{enum, [atom()]}`) map to `VARCHAR(255)`. Changing the enum value list doesn't trigger a migration since the underlying column type is unchanged.

@@ -6,7 +6,8 @@
     build_db_state/1,
     build_desired_state/1,
     diff/2,
-    field_to_column/1
+    field_to_column/1,
+    format_error/1
 ]).
 
 -type col_state() :: #{binary() => [#kura_column{}]}.
@@ -153,40 +154,134 @@ enrich_with_associations(Mod, Columns) ->
         false ->
             Columns;
         true ->
-            try
-                Assocs = Mod:associations(),
-                BelongsTo = [A || A <- Assocs, A#kura_assoc.type =:= belongs_to],
-                lists:foldl(fun enrich_column/2, Columns, BelongsTo)
-            catch
-                _:_ -> Columns
+            Assocs = Mod:associations(),
+            %% Validate every association, not just the ones that own a
+            %% column: this is what turns an on_delete declared on a
+            %% has_many into a named failure instead of a no-op.
+            lists:foreach(fun(A) -> assoc_on_delete(Mod, A) end, Assocs),
+            BelongsTo = [A || A <- Assocs, A#kura_assoc.type =:= belongs_to],
+            lists:foldl(fun enrich_column/2, Columns, [{Mod, A} || A <- BelongsTo])
+    end.
+
+enrich_column({Mod, Assoc}, Columns) ->
+    case kura_schema:assoc_fields(Assoc) of
+        [] ->
+            Columns;
+        [FK] ->
+            Target = resolve_target(Mod, Assoc),
+            Refs = {Target:table(), find_primary_key(Target:fields())},
+            OnDelete = assoc_on_delete(Mod, Assoc),
+            enrich_fk_column(Mod, Assoc, FK, Refs, OnDelete, Columns);
+        _Composite ->
+            %% A composite foreign key is a table-level constraint, which the
+            %% generator does not emit yet. Say so rather than emit a partial
+            %% one-column constraint that looks right.
+            error(
+                {kura_schema_diff, {composite_assoc_unsupported, Mod, Assoc#kura_assoc.name}}
+            )
+    end.
+
+enrich_fk_column(Mod, Assoc, FK, Refs, OnDelete, Columns) ->
+    case lists:any(fun(C) -> C#kura_column.name =:= FK end, Columns) of
+        false ->
+            error({kura_schema_diff, {assoc_key_not_a_field, Mod, Assoc#kura_assoc.name, FK}});
+        true ->
+            [
+                case C#kura_column.name of
+                    FK when C#kura_column.references =:= undefined ->
+                        C#kura_column{references = Refs, on_delete = OnDelete};
+                    _ ->
+                        C
+                end
+             || C <- Columns
+            ]
+    end.
+
+%% An association whose target cannot be resolved used to be swallowed by a
+%% blanket catch, so the foreign key was silently dropped from the generated
+%% migration and the schema and the database disagreed forever.
+resolve_target(Mod, Assoc) ->
+    Name = Assoc#kura_assoc.name,
+    case kura_schema:assoc_target(Assoc) of
+        undefined ->
+            error({kura_schema_diff, {assoc_target_undeclared, Mod, Name}});
+        Target ->
+            case code:ensure_loaded(Target) of
+                {error, Reason} ->
+                    error(
+                        {kura_schema_diff, {assoc_target_not_loadable, Mod, Name, Target, Reason}}
+                    );
+                {module, Target} ->
+                    ok = ensure_schema_module(Mod, Name, Target),
+                    Target
             end
     end.
 
-enrich_column(#kura_assoc{foreign_key = FK, schema = TargetSchema}, Columns) ->
-    case FK of
-        undefined ->
-            Columns;
-        _ ->
-            try
-                TargetTable = TargetSchema:table(),
-                TargetFields = TargetSchema:fields(),
-                TargetPK = find_primary_key(TargetFields),
-                [
-                    case C#kura_column.name of
-                        FK when C#kura_column.references =:= undefined ->
-                            C#kura_column{
-                                references = {TargetTable, TargetPK},
-                                on_delete = no_action
-                            };
-                        _ ->
-                            C
-                    end
-                 || C <- Columns
-                ]
-            catch
-                _:_ -> Columns
-            end
+assoc_on_delete(Mod, Assoc) ->
+    try
+        kura_schema:assoc_on_delete(Assoc)
+    catch
+        error:{invalid_on_delete, Name, Action} ->
+            error({kura_schema_diff, {invalid_on_delete, Mod, Name, Action}});
+        error:{on_delete_not_owned, Name, Type} ->
+            error({kura_schema_diff, {on_delete_not_owned, Mod, Name, Type}})
     end.
+
+ensure_schema_module(Mod, Name, Target) ->
+    Exported =
+        erlang:function_exported(Target, table, 0) andalso
+            erlang:function_exported(Target, fields, 0),
+    case Exported of
+        true ->
+            ok;
+        false ->
+            error({kura_schema_diff, {assoc_target_not_a_schema, Mod, Name, Target}})
+    end.
+
+-spec format_error(term()) -> iolist().
+format_error({assoc_target_undeclared, Mod, Name}) ->
+    io_lib:format(
+        "~s: association '~s' declares neither schema nor ref target, so its "
+        "foreign key cannot be generated",
+        [Mod, Name]
+    );
+format_error({assoc_target_not_loadable, Mod, Name, Target, Reason}) ->
+    io_lib:format(
+        "~s: association '~s' targets ~s, which could not be loaded (~p). If it "
+        "lives in a dependency, check that the dependency is built",
+        [Mod, Name, Target, Reason]
+    );
+format_error({assoc_target_not_a_schema, Mod, Name, Target}) ->
+    io_lib:format(
+        "~s: association '~s' targets ~s, which does not export table/0 and fields/0",
+        [Mod, Name, Target]
+    );
+format_error({assoc_key_not_a_field, Mod, Name, FK}) ->
+    io_lib:format(
+        "~s: association '~s' names foreign key '~s', which is not a field on ~s",
+        [Mod, Name, FK, Mod]
+    );
+format_error({composite_assoc_unsupported, Mod, Name}) ->
+    io_lib:format(
+        "~s: association '~s' has a composite foreign key; the generator cannot "
+        "emit a composite constraint, so write the migration by hand",
+        [Mod, Name]
+    );
+format_error({invalid_on_delete, Mod, Name, Action}) ->
+    io_lib:format(
+        "~s: association '~s' declares on_delete = ~p; expected one of "
+        "cascade, restrict, set_null, no_action",
+        [Mod, Name, Action]
+    );
+format_error({on_delete_not_owned, Mod, Name, Type}) ->
+    io_lib:format(
+        "~s: association '~s' is a ~s and owns no foreign-key column, so its "
+        "on_delete would never reach the database. Declare it on the belongs_to "
+        "on the other side",
+        [Mod, Name, Type]
+    );
+format_error(Reason) ->
+    io_lib:format("~p", [Reason]).
 
 find_primary_key(Fields) ->
     case [F#kura_field.name || F <- Fields, F#kura_field.primary_key =:= true] of

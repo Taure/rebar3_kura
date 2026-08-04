@@ -5,6 +5,7 @@
 -export([init/1, do/1, format_error/1]).
 -export([
     ensure_kura_on_path/1,
+    ensure_code_path/1,
     find_schema_files/2,
     find_migration_files/1,
     compile_opts/1,
@@ -39,7 +40,7 @@ do(State) ->
             undefined -> rebar_state:project_apps(State);
             AppInfo -> [AppInfo]
         end,
-    ensure_kura_on_path(State),
+    ensure_code_path(State),
     lists:foreach(fun(AppInfo) -> process_app(AppInfo) end, Apps),
     {ok, State}.
 
@@ -49,6 +50,25 @@ format_error(Reason) ->
 %%====================================================================
 %% Internal
 %%====================================================================
+
+%% An association can point at a schema module that lives in a dependency -
+%% that is the whole shape of an extension, whose schemas ship in a dep of
+%% the host. Resolving its target table means loading that module, which
+%% means every dep's and sibling app's ebin has to be on the code path
+%% before the diff runs.
+ensure_code_path(State) ->
+    Apps = rebar_state:all_deps(State) ++ rebar_state:project_apps(State),
+    lists:foreach(fun(App) -> add_ebin(rebar_app_info:ebin_dir(App)) end, Apps),
+    ensure_kura_on_path(State).
+
+add_ebin(Dir) ->
+    case filelib:is_dir(Dir) of
+        true ->
+            _ = code:add_pathz(Dir),
+            ok;
+        false ->
+            ok
+    end.
 
 ensure_kura_on_path(State) ->
     case code:lib_dir(kura) of
@@ -89,6 +109,9 @@ process_app(AppInfo) ->
                 generate_migration(MigDir, UpOps, DownOps),
                 rebar_api:info("kura: migration generated", [])
         end
+    catch
+        error:{kura_schema_diff, Reason} ->
+            rebar_api:abort("kura: ~ts", [kura_schema_diff:format_error(Reason)])
     after
         cleanup(AllLoaded)
     end.

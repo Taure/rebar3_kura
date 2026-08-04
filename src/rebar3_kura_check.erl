@@ -49,7 +49,7 @@ do(State) ->
             undefined -> rebar_state:project_apps(State);
             AppInfo -> [AppInfo]
         end,
-    rebar3_kura_compile:ensure_kura_on_path(State),
+    rebar3_kura_compile:ensure_code_path(State),
     case check_apps(Apps, []) of
         [] ->
             rebar_api:info("kura: no schema drift", []),
@@ -96,6 +96,9 @@ check_app(AppInfo) ->
             {[], []} -> none;
             {UpOps, DownOps} -> {drift, UpOps, DownOps}
         end
+    catch
+        error:{kura_schema_diff, Reason} ->
+            rebar_api:abort("kura: ~ts", [kura_schema_diff:format_error(Reason)])
     after
         rebar3_kura_compile:cleanup(AllLoaded)
     end.
