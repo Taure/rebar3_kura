@@ -206,7 +206,10 @@ build_desired_state_test() ->
     meck:unload(test_schema).
 
 build_desired_state_empty_test() ->
-    ?assertEqual(#{columns => #{}, indexes => #{}}, kura_schema_diff:build_desired_state([])).
+    ?assertEqual(
+        #{columns => #{}, indexes => #{}, unsupported => []},
+        kura_schema_diff:build_desired_state([])
+    ).
 
 build_desired_state_multiple_schemas_test() ->
     meck:new(schema_a, [non_strict]),
@@ -638,10 +641,12 @@ build_desired_state_target_schema_unavailable_test() ->
             }
         ]
     end),
-    State = cols(kura_schema_diff:build_desired_state([ts_post])),
-    [_, FkCol] = maps:get(<<"posts">>, State),
-    %% Should gracefully skip - no references set
-    ?assertEqual(undefined, FkCol#kura_column.references),
+    %% Skipping this used to emit a table with no foreign key at all, so the
+    %% schema and the database disagreed with nothing on stdout to say so.
+    ?assertError(
+        {kura_schema_diff, {assoc_target_not_loadable, ts_post, user, nonexistent_schema, nofile}},
+        kura_schema_diff:build_desired_state([ts_post])
+    ),
     meck:unload(ts_post).
 
 %%====================================================================
