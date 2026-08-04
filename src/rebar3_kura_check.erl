@@ -92,6 +92,7 @@ check_app(AppInfo) ->
     try
         DbState = kura_schema_diff:build_db_state(MigMods),
         DesiredState = kura_schema_diff:build_desired_state(SchemaMods),
+        report_unsupported(kura_schema_diff:unsupported_schemas(DesiredState)),
         case kura_schema_diff:diff(DbState, DesiredState) of
             {[], []} -> none;
             {UpOps, DownOps} -> {drift, UpOps, DownOps}
@@ -102,6 +103,17 @@ check_app(AppInfo) ->
     after
         rebar3_kura_compile:cleanup(AllLoaded)
     end.
+
+%% A schema the generator cannot express is skipped, not fatal: aborting here
+%% would make every other table in the application uncheckable for as long as
+%% the unsupported schema exists, which is forever.
+report_unsupported([]) ->
+    ok;
+report_unsupported([{_Mod, Reason} | Rest]) ->
+    rebar_api:warn(
+        "kura: schema not checked - ~ts", [kura_schema_diff:format_error(Reason)]
+    ),
+    report_unsupported(Rest).
 
 report_drift(Drift) ->
     rebar_api:info("kura: schema drift detected — see below", []),

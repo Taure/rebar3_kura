@@ -101,6 +101,7 @@ process_app(AppInfo) ->
     try
         DbState = kura_schema_diff:build_db_state(MigMods),
         DesiredState = kura_schema_diff:build_desired_state(SchemaMods),
+        report_unsupported(kura_schema_diff:unsupported_schemas(DesiredState)),
         case kura_schema_diff:diff(DbState, DesiredState) of
             {[], []} ->
                 rebar_api:info("kura: schemas up to date", []);
@@ -115,6 +116,16 @@ process_app(AppInfo) ->
     after
         cleanup(AllLoaded)
     end.
+
+%% Skipped rather than fatal, and said out loud on every run: the table is
+%% hand-managed from here on, but every other table still generates.
+report_unsupported([]) ->
+    ok;
+report_unsupported([{_Mod, Reason} | Rest]) ->
+    rebar_api:warn(
+        "kura: no migration generated - ~ts", [kura_schema_diff:format_error(Reason)]
+    ),
+    report_unsupported(Rest).
 
 find_schema_files(SrcDir, MigDir) ->
     AllErl = filelib:wildcard(filename:join([SrcDir, "**", "*.erl"])),

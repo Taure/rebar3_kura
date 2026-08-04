@@ -7,13 +7,25 @@
     build_desired_state/1,
     diff/2,
     field_to_column/1,
-    format_error/1
+    format_error/1,
+    unsupported_schemas/1
 ]).
+
+-define(ALTER_COLUMN_RE, <<"^ALTER TABLE \"([^\"]+)\" ALTER COLUMN \"([^\"]+)\" (.+)$">>).
+-define(ADD_FK_RE, <<
+    "^ALTER TABLE \"([^\"]+)\" ADD CONSTRAINT \"[^\"]+\" FOREIGN KEY \\(\"([^\"]+)\"\\) "
+    "REFERENCES \"([^\"]+)\" \\(\"([^\"]+)\"\\)(.*)$"
+>>).
+-define(DROP_FK_RE, <<"^ALTER TABLE \"([^\"]+)\" DROP CONSTRAINT \"([^\"]+)\"$">>).
 
 -type col_state() :: #{binary() => [#kura_column{}]}.
 -type index_entry() :: {[atom()], map()}.
 -type index_state() :: #{binary() => [index_entry()]}.
--type db_state() :: #{columns => col_state(), indexes => index_state()}.
+-type db_state() :: #{
+    columns => col_state(),
+    indexes => index_state(),
+    unsupported => [{module(), term()}]
+}.
 -type operation() ::
     {create_table, binary(), [#kura_column{}]}
     | {drop_table, binary()}
@@ -51,17 +63,37 @@ build_db_state(MigModules) ->
 -spec build_desired_state([module()]) -> db_state().
 build_desired_state(SchemaModules) ->
     lists:foldl(
-        fun(Mod, #{columns := ColAcc, indexes := IdxAcc} = _Acc) ->
-            Table = Mod:table(),
-            Fields = Mod:fields(),
-            Columns = [field_to_column(F) || F <- Fields, F#kura_field.virtual =/= true],
-            Enriched = enrich_with_associations(Mod, Columns),
-            Indexes = extract_indexes(Mod),
-            #{columns => ColAcc#{Table => Enriched}, indexes => IdxAcc#{Table => Indexes}}
-        end,
-        #{columns => #{}, indexes => #{}},
+        fun desired_state_for/2,
+        #{columns => #{}, indexes => #{}, unsupported => []},
         SchemaModules
     ).
+
+%% A schema the generator can never express is refused on its own rather than
+%% aborting the run: one composite foreign key must not stop every other table
+%% in the application being checked for drift. Everything else is a mistake the
+%% author can fix, so it still aborts.
+desired_state_for(Mod, #{columns := ColAcc, indexes := IdxAcc, unsupported := Unsup} = Acc) ->
+    try
+        Table = Mod:table(),
+        Fields = Mod:fields(),
+        Columns = [field_to_column(F) || F <- Fields, F#kura_field.virtual =/= true],
+        Enriched = enrich_with_associations(Mod, Columns),
+        Indexes = extract_indexes(Mod),
+        Acc#{columns => ColAcc#{Table => Enriched}, indexes => IdxAcc#{Table => Indexes}}
+    catch
+        error:{kura_schema_diff, {composite_assoc_unsupported, _, _} = Reason} ->
+            Acc#{unsupported => Unsup ++ [{Mod, Reason}]};
+        error:{kura_schema_diff, {composite_target_key, _, _, _, _} = Reason} ->
+            Acc#{unsupported => Unsup ++ [{Mod, Reason}]}
+    end.
+
+-doc """
+Schemas excluded from a desired state because the generator cannot express
+them, paired with the reason. Render each with `format_error/1`.
+""".
+-spec unsupported_schemas(db_state()) -> [{module(), term()}].
+unsupported_schemas(State) ->
+    maps:get(unsupported, State, []).
 
 -spec extract_indexes(module()) -> [index_entry()].
 extract_indexes(Mod) ->
@@ -154,7 +186,7 @@ enrich_with_associations(Mod, Columns) ->
         false ->
             Columns;
         true ->
-            Assocs = Mod:associations(),
+            Assocs = schema_associations(Mod),
             %% Validate every association, not just the ones that own a
             %% column: this is what turns an on_delete declared on a
             %% has_many into a named failure instead of a no-op.
@@ -163,22 +195,61 @@ enrich_with_associations(Mod, Columns) ->
             lists:foldl(fun enrich_column/2, Columns, [{Mod, A} || A <- BelongsTo])
     end.
 
+%% associations/0 is user code. Called bare it produces a raw rebar3
+%% stacktrace instead of a message naming the schema that failed.
+schema_associations(Mod) ->
+    try
+        Mod:associations()
+    catch
+        Class:Reason ->
+            error({kura_schema_diff, {associations_failed, Mod, Class, Reason}})
+    end.
+
 enrich_column({Mod, Assoc}, Columns) ->
+    Name = Assoc#kura_assoc.name,
     case kura_schema:assoc_fields(Assoc) of
         [] ->
-            Columns;
+            %% Every other malformation is named, so this one is too: a
+            %% belongs_to with neither foreign_key nor ref fields has no
+            %% column to hang its constraint on.
+            error({kura_schema_diff, {assoc_key_undeclared, Mod, Name}});
         [FK] ->
             Target = resolve_target(Mod, Assoc),
-            Refs = {Target:table(), find_primary_key(Target:fields())},
+            Refs = {Target:table(), target_key(Mod, Name, Assoc, Target)},
             OnDelete = assoc_on_delete(Mod, Assoc),
             enrich_fk_column(Mod, Assoc, FK, Refs, OnDelete, Columns);
         _Composite ->
             %% A composite foreign key is a table-level constraint, which the
             %% generator does not emit yet. Say so rather than emit a partial
             %% one-column constraint that looks right.
-            error(
-                {kura_schema_diff, {composite_assoc_unsupported, Mod, Assoc#kura_assoc.name}}
-            )
+            error({kura_schema_diff, {composite_assoc_unsupported, Mod, Name}})
+    end.
+
+%% kura_schema:key/1 is the schema's own key resolution: the key/0 callback
+%% wins, primary_key = true fields are only the fallback. Rederiving it here
+%% missed key/0 entirely and truncated a composite key to its first column,
+%% which generated a foreign key pointing at one half of a two-column key.
+target_key(Mod, Name, Assoc, Target) ->
+    case declared_target_key(Assoc, Target) of
+        [Col] ->
+            Col;
+        [] ->
+            error({kura_schema_diff, {assoc_target_no_key, Mod, Name, Target}});
+        Cols ->
+            error({kura_schema_diff, {composite_target_key, Mod, Name, Target, Cols}})
+    end.
+
+declared_target_key(Assoc, Target) ->
+    case kura_schema:assoc_target_key(Assoc) of
+        undefined -> target_schema_key(Target);
+        Cols -> Cols
+    end.
+
+target_schema_key(Target) ->
+    try
+        kura_schema:key(Target)
+    catch
+        error:{no_primary_key, Target} -> []
     end.
 
 enrich_fk_column(Mod, Assoc, FK, Refs, OnDelete, Columns) ->
@@ -256,6 +327,35 @@ format_error({assoc_target_not_a_schema, Mod, Name, Target}) ->
         "~s: association '~s' targets ~s, which does not export table/0 and fields/0",
         [Mod, Name, Target]
     );
+format_error({assoc_key_undeclared, Mod, Name}) ->
+    io_lib:format(
+        "~s: association '~s' declares neither foreign_key nor ref fields, so "
+        "there is no column to attach its foreign key to",
+        [Mod, Name]
+    );
+format_error({assoc_target_no_key, Mod, Name, Target}) ->
+    io_lib:format(
+        "~s: association '~s' targets ~s, which declares no primary key, so "
+        "there is nothing for the foreign key to reference",
+        [Mod, Name, Target]
+    );
+format_error({composite_target_key, Mod, Name, Target, Cols}) ->
+    io_lib:format(
+        "~s: association '~s' targets ~s, whose primary key is composite (~s). "
+        "A single-column foreign key cannot reference it, so declare the "
+        "constraint in a hand-written migration",
+        [Mod, Name, Target, format_atoms(Cols)]
+    );
+format_error({associations_failed, Mod, Class, Reason}) ->
+    io_lib:format("~s: associations/0 raised ~s:~p", [Mod, Class, Reason]);
+format_error({fk_on_update_not_owned, Table, Col, OnUpdate}) ->
+    io_lib:format(
+        "table \"~s\": the foreign key on '~s' changed, but the existing "
+        "constraint carries ON UPDATE ~s, which no schema can declare. "
+        "Regenerating the constraint would silently drop that clause, so "
+        "write this change as a hand-written migration",
+        [Table, Col, string:uppercase(atom_to_list(OnUpdate))]
+    );
 format_error({assoc_key_not_a_field, Mod, Name, FK}) ->
     io_lib:format(
         "~s: association '~s' names foreign key '~s', which is not a field on ~s",
@@ -273,6 +373,15 @@ format_error({invalid_on_delete, Mod, Name, Action}) ->
         "cascade, restrict, set_null, no_action",
         [Mod, Name, Action]
     );
+format_error({on_delete_not_owned, Mod, Name, many_to_many}) ->
+    %% There is no belongs_to on the other side of a many_to_many, and the
+    %% foreign keys live on the join table, which this generator never emits.
+    io_lib:format(
+        "~s: association '~s' is a many_to_many and owns no foreign-key column. "
+        "Its foreign keys belong to the join table, which the generator does "
+        "not emit, so declare on_delete in that table's own migration",
+        [Mod, Name]
+    );
 format_error({on_delete_not_owned, Mod, Name, Type}) ->
     io_lib:format(
         "~s: association '~s' is a ~s and owns no foreign-key column, so its "
@@ -283,11 +392,8 @@ format_error({on_delete_not_owned, Mod, Name, Type}) ->
 format_error(Reason) ->
     io_lib:format("~p", [Reason]).
 
-find_primary_key(Fields) ->
-    case [F#kura_field.name || F <- Fields, F#kura_field.primary_key =:= true] of
-        [PK | _] -> PK;
-        [] -> id
-    end.
+format_atoms(Atoms) ->
+    lists:join(", ", [atom_to_list(A) || A <- Atoms]).
 
 %%% Internal
 
@@ -489,13 +595,96 @@ diff_columns(Table, DbCols, DesiredCols) ->
                         DownDef = default_sql(Table, ColBin, DbCol#kura_column.default),
                         {EU2 ++ [{execute, UpDef}], ED2 ++ [{execute, DownDef}]}
                 end,
-            {MU2, MD2, EU3, ED3}
+            %% Foreign key changes
+            {FkUp, FkDown} = fk_ops(Table, Name, DbCol, DesCol),
+            {MU2, MD2, EU3 ++ FkUp, ED3 ++ FkDown}
         end,
         {[], [], [], []},
         lists:sort(Common)
     ),
 
     {AddUp ++ DropUp ++ ModUp, AddDown ++ DropDown ++ ModDown, ExecUp, ExecDown}.
+
+%% An association edited on a table that already exists reaches the diff as a
+%% changed `references`/`on_delete` on a column both sides already have. There
+%% is no alter_op for a constraint, so it lowers to explicit SQL, and both
+%% directions drop the old constraint before adding the new one: no dialect
+%% kura targets can change a referential action in place.
+fk_ops(Table, Name, DbCol, DesCol) ->
+    DbFk = {DbCol#kura_column.references, DbCol#kura_column.on_delete},
+    DesFk = {DesCol#kura_column.references, DesCol#kura_column.on_delete},
+    case DbFk =:= DesFk of
+        true ->
+            {[], []};
+        false ->
+            ok = assert_fk_regenerable(Table, Name, DbCol),
+            {
+                fk_transition(Table, Name, DbCol, DesCol),
+                fk_transition(Table, Name, DesCol, DbCol)
+            }
+    end.
+
+%% ON UPDATE can only come from a hand-written migration - no schema can
+%% declare it - so regenerating the constraint from the schema would drop it.
+assert_fk_regenerable(Table, Name, #kura_column{references = Refs, on_update = OnUpdate}) when
+    Refs =/= undefined, OnUpdate =/= undefined
+->
+    error({kura_schema_diff, {fk_on_update_not_owned, Table, Name, OnUpdate}});
+assert_fk_regenerable(_Table, _Name, _DbCol) ->
+    ok.
+
+fk_transition(Table, Name, From, To) ->
+    Drop =
+        case From#kura_column.references of
+            undefined -> [];
+            _ -> [{execute, drop_fk_sql(Table, Name)}]
+        end,
+    Add =
+        case To#kura_column.references of
+            undefined -> [];
+            Refs -> [{execute, add_fk_sql(Table, Name, Refs, To#kura_column.on_delete)}]
+        end,
+    Drop ++ Add.
+
+%% PostgreSQL's own name for the constraint an inline REFERENCES creates, so a
+%% DROP here finds the one create_table/add_column generated.
+-spec fk_constraint_name(binary(), atom()) -> binary().
+fk_constraint_name(Table, Col) ->
+    iolist_to_binary([Table, ~"_", atom_to_binary(Col, utf8), ~"_fkey"]).
+
+drop_fk_sql(Table, Col) ->
+    iolist_to_binary([
+        ~"ALTER TABLE ",
+        quote(Table),
+        ~" DROP CONSTRAINT ",
+        quote(fk_constraint_name(Table, Col))
+    ]).
+
+add_fk_sql(Table, Col, {RefTable, RefCol}, OnDelete) ->
+    iolist_to_binary([
+        ~"ALTER TABLE ",
+        quote(Table),
+        ~" ADD CONSTRAINT ",
+        quote(fk_constraint_name(Table, Col)),
+        ~" FOREIGN KEY (",
+        quote(atom_to_binary(Col, utf8)),
+        ~") REFERENCES ",
+        quote(RefTable),
+        ~" (",
+        quote(atom_to_binary(RefCol, utf8)),
+        ~")",
+        on_delete_clause(OnDelete)
+    ]).
+
+on_delete_clause(undefined) -> <<>>;
+on_delete_clause(cascade) -> ~" ON DELETE CASCADE";
+on_delete_clause(restrict) -> ~" ON DELETE RESTRICT";
+on_delete_clause(set_null) -> ~" ON DELETE SET NULL";
+on_delete_clause(no_action) -> ~" ON DELETE NO ACTION".
+
+-spec quote(binary()) -> binary().
+quote(Bin) ->
+    <<"\"", Bin/binary, "\"">>.
 
 default_sql(Table, ColBin, undefined) ->
     <<"ALTER TABLE \"", Table/binary, "\" ALTER COLUMN \"", ColBin/binary, "\" DROP DEFAULT">>;
@@ -520,13 +709,7 @@ col_map(Cols) ->
 %% Parse known SQL patterns from {execute, SQL} ops to update column state
 -spec try_apply_execute(binary(), col_state()) -> col_state().
 try_apply_execute(SQL, State) ->
-    case
-        re:run(
-            SQL,
-            <<"^ALTER TABLE \"([^\"]+)\" ALTER COLUMN \"([^\"]+)\" (.+)$">>,
-            [{capture, all_but_first, binary}]
-        )
-    of
+    case re:run(SQL, ?ALTER_COLUMN_RE, [{capture, all_but_first, binary}]) of
         {match, [Table, Col, Action]} ->
             ColAtom = binary_to_atom(Col, utf8),
             case parse_action(Action) of
@@ -534,8 +717,52 @@ try_apply_execute(SQL, State) ->
                 nomatch -> State
             end;
         nomatch ->
+            try_apply_fk_execute(SQL, State)
+    end.
+
+%% Replaying the constraint SQL back into the column state is what stops a
+%% generated foreign-key migration being regenerated on every subsequent run.
+-spec try_apply_fk_execute(binary(), col_state()) -> col_state().
+try_apply_fk_execute(SQL, State) ->
+    case re:run(SQL, ?ADD_FK_RE, [{capture, all_but_first, binary}]) of
+        {match, [Table, Col, RefTable, RefCol, Tail]} ->
+            Refs = {RefTable, binary_to_atom(RefCol, utf8)},
+            Parsed = {fk, Refs, parse_on_delete(Tail)},
+            update_col(Table, binary_to_atom(Col, utf8), Parsed, State);
+        nomatch ->
+            try_apply_fk_drop(SQL, State)
+    end.
+
+-spec try_apply_fk_drop(binary(), col_state()) -> col_state().
+try_apply_fk_drop(SQL, State) ->
+    case re:run(SQL, ?DROP_FK_RE, [{capture, all_but_first, binary}]) of
+        {match, [Table, Constraint]} ->
+            drop_fk(Table, Constraint, State);
+        nomatch ->
             State
     end.
+
+drop_fk(Table, Constraint, State) ->
+    case maps:find(Table, State) of
+        {ok, Cols} ->
+            NewCols = [
+                case fk_constraint_name(Table, C#kura_column.name) of
+                    Constraint -> C#kura_column{references = undefined, on_delete = undefined};
+                    _ -> C
+                end
+             || C <- Cols
+            ],
+            State#{Table => NewCols};
+        error ->
+            State
+    end.
+
+parse_on_delete(<<>>) -> undefined;
+parse_on_delete(~" ON DELETE CASCADE") -> cascade;
+parse_on_delete(~" ON DELETE RESTRICT") -> restrict;
+parse_on_delete(~" ON DELETE SET NULL") -> set_null;
+parse_on_delete(~" ON DELETE NO ACTION") -> no_action;
+parse_on_delete(_) -> undefined.
 
 parse_action(<<"SET NOT NULL">>) -> {ok, {nullable, false}};
 parse_action(<<"DROP NOT NULL">>) -> {ok, {nullable, true}};
@@ -585,6 +812,20 @@ update_col(Table, ColName, {default, Val}, State) ->
             NewCols = [
                 case C#kura_column.name of
                     ColName -> C#kura_column{default = Val};
+                    _ -> C
+                end
+             || C <- Cols
+            ],
+            State#{Table => NewCols};
+        error ->
+            State
+    end;
+update_col(Table, ColName, {fk, Refs, OnDelete}, State) ->
+    case maps:find(Table, State) of
+        {ok, Cols} ->
+            NewCols = [
+                case C#kura_column.name of
+                    ColName -> C#kura_column{references = Refs, on_delete = OnDelete};
                     _ -> C
                 end
              || C <- Cols

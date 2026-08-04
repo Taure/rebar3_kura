@@ -206,7 +206,10 @@ build_desired_state_test() ->
     meck:unload(test_schema).
 
 build_desired_state_empty_test() ->
-    ?assertEqual(#{columns => #{}, indexes => #{}}, kura_schema_diff:build_desired_state([])).
+    ?assertEqual(
+        #{columns => #{}, indexes => #{}, unsupported => []},
+        kura_schema_diff:build_desired_state([])
+    ).
 
 build_desired_state_multiple_schemas_test() ->
     meck:new(schema_a, [non_strict]),

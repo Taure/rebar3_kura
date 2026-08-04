@@ -119,14 +119,37 @@ associations() ->
 
 Omitting `on_delete` generates `ON DELETE NO ACTION`, as before.
 
+Editing an association on a table that **already exists** generates a
+migration too, not just a new table or a new column. A changed `references`
+or `on_delete` lowers to an explicit `ALTER TABLE ... DROP CONSTRAINT`
+followed by `ADD CONSTRAINT`, because no dialect kura targets can change a
+referential action in place. Removing the `belongs_to` generates the `DROP`
+on its own. The constraint is named `<table>_<column>_fkey`, which is the
+name PostgreSQL gives the one an inline `REFERENCES` creates. A dialect with
+no `ALTER TABLE ... DROP CONSTRAINT` (SQLite) will reject the generated
+migration when it runs, the same way it already rejects a generated
+`SET NOT NULL`.
+
+One transition is refused rather than generated: if the existing constraint
+carries an `ON UPDATE` action, regenerating it from the schema would silently
+drop that clause, because no schema can declare `on_update`. That aborts with
+`fk_on_update_not_owned` and asks for a hand-written migration.
+
 An association the generator cannot resolve aborts the run and names the
-schema, the association and the reason. It is never skipped: a dropped
-foreign key leaves the schema and the database disagreeing with nothing on
-stdout to say so. The named failures are an undeclared target, a target that
-will not load, a target that is not a schema module, a foreign key that is
-not a field on the owning schema, a composite foreign key (not supported by
-the generator - write that migration by hand), and an invalid or misplaced
-`on_delete`.
+schema, the association and the reason. It is never silently skipped: a
+dropped foreign key leaves the schema and the database disagreeing with
+nothing on stdout to say so. The named failures are an undeclared target, a
+target that will not load, a target that is not a schema module, a missing
+`foreign_key`/`ref`, a foreign key that is not a field on the owning schema,
+a parent with no primary key, and an invalid or misplaced `on_delete`.
+
+Two of them are **scoped to the offending schema** instead of aborting: a
+composite foreign key, and a parent whose own primary key is composite.
+Neither is expressible as a single-column constraint and neither can be
+fixed by editing the schema, so aborting would make every other table in the
+application permanently ungeneratable and uncheckable. That schema's table
+is skipped, `compile` and `check` warn by name on every run, and every other
+table is still generated and still checked.
 
 Targets that live in a dependency resolve too - every dependency's and
 sibling app's `ebin` is added to the code path before the diff runs, which is
