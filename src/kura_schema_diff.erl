@@ -128,7 +128,14 @@ diff(DbState, DesiredState) ->
             DbTableIdx = maps:get(Table, DbIdx, []),
             DesiredTableIdx = maps:get(Table, DesiredIdx, []),
             {IU, ID} = diff_indexes(Table, DbTableIdx, DesiredTableIdx),
-            {IUpAcc ++ IU, IDownAcc ++ ID}
+            %% The same down/0 drops this table, which drops its indexes with
+            %% it, so a drop_index that follows raises 42704.
+            Down =
+                case lists:member(Table, NewTables) of
+                    true -> [];
+                    false -> ID
+                end,
+            {IUpAcc ++ IU, IDownAcc ++ Down}
         end,
         {[], []},
         lists:sort(AllDesiredTables)
