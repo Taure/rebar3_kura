@@ -873,7 +873,9 @@ diff_new_table_with_indexes_test() ->
             Down
         )
     ),
-    ?assert(
+    %% The drop_table above already drops the index, so emitting a
+    %% drop_index after it makes the rollback fail with 42704.
+    ?assertNot(
         lists:any(
             fun
                 ({drop_index, _}) -> true;
@@ -883,6 +885,58 @@ diff_new_table_with_indexes_test() ->
         )
     ),
     meck:unload(new_idx_schema).
+
+diff_new_table_index_down_is_only_the_drop_table_test() ->
+    %% Taure/rebar3_kura#43: two tables, each with two indexes, one of
+    %% them unique and used as an ON CONFLICT target - the shape the
+    %% first asobi extension generated, whose down/0 could not run.
+    meck:new(quests_schema, [non_strict]),
+    meck:expect(quests_schema, table, fun() -> <<"quests">> end),
+    meck:expect(quests_schema, fields, fun() ->
+        [
+            #kura_field{name = id, type = id, primary_key = true},
+            #kura_field{name = quest_key, type = string, nullable = false},
+            #kura_field{name = counter, type = string, nullable = false},
+            #kura_field{name = active, type = boolean, nullable = false}
+        ]
+    end),
+    meck:expect(quests_schema, indexes, fun() ->
+        [{[quest_key], #{unique => true}}, {[counter, active], #{}}]
+    end),
+    meck:new(progress_schema, [non_strict]),
+    meck:expect(progress_schema, table, fun() -> <<"quest_progress">> end),
+    meck:expect(progress_schema, fields, fun() ->
+        [
+            #kura_field{name = id, type = id, primary_key = true},
+            #kura_field{name = player_id, type = uuid, nullable = false},
+            #kura_field{name = quest_id, type = uuid, nullable = false},
+            #kura_field{name = period_key, type = string, nullable = false},
+            #kura_field{name = completed_at, type = utc_datetime}
+        ]
+    end),
+    meck:expect(progress_schema, indexes, fun() ->
+        [
+            {[player_id, quest_id, period_key], #{unique => true}},
+            {[player_id, completed_at], #{}}
+        ]
+    end),
+
+    DbState = kura_schema_diff:build_db_state([]),
+    DesiredState = kura_schema_diff:build_desired_state([quests_schema, progress_schema]),
+    {Up, Down} = kura_schema_diff:diff(DbState, DesiredState),
+
+    %% Every declared index is still created.
+    ?assertEqual(
+        4,
+        length([Op || {create_index, _, _, _} = Op <- Up])
+    ),
+    %% The down is the two table drops and nothing else.
+    ?assertEqual(
+        [{drop_table, <<"quest_progress">>}, {drop_table, <<"quests">>}],
+        Down
+    ),
+
+    meck:unload([quests_schema, progress_schema]).
 
 %%====================================================================
 %% Regression: schema declares an index that no migration creates
