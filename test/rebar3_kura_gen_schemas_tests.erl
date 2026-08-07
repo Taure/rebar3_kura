@@ -1,6 +1,8 @@
 -module(rebar3_kura_gen_schemas_tests).
 -include_lib("eunit/include/eunit.hrl").
 
+-define(TMPDIR, "/tmp").
+
 source(App, TableInfo) ->
     iolist_to_binary(rebar3_kura_gen_schemas:schema_source(App, TableInfo)).
 
@@ -106,3 +108,42 @@ split_dots([{dot, _} = D | Rest], Cur, Acc) ->
     split_dots(Rest, [], [lists:reverse([D | Cur]) | Acc]);
 split_dots([T | Rest], Cur, Acc) ->
     split_dots(Rest, [T | Cur], Acc).
+
+%%----------------------------------------------------------------------
+%% ensure_backend_on_path/2
+%%----------------------------------------------------------------------
+
+fake_state(Dir, Deps) ->
+    AppInfos = [
+        begin
+            {ok, A} = rebar_app_info:new(Name, "1.0.0", filename:join(Dir, Name)),
+            A
+        end
+     || Name <- Deps
+    ],
+    rebar_state:all_deps(rebar_state:new(), AppInfos).
+
+%% Regression: the backend's driver (minato) is a transitive dep, and
+%% start_pool/2 starts it as an application - so adding only the backend's
+%% own ebin left minato.app unreachable and introspection crashed.
+ensure_backend_on_path_adds_transitive_deps_test() ->
+    Deps = ["kura", "kura_postgres", "minato"],
+    Dir = filename:join(?TMPDIR, "rebar3_kura_path_test"),
+    _ = [ok = filelib:ensure_path(filename:join([Dir, D, "ebin"])) || D <- Deps],
+    State = fake_state(Dir, Deps),
+    ok = rebar3_kura_gen_schemas:ensure_backend_on_path(State, #{
+        backend => kura_backend_postgres
+    }),
+    Path = code:get_path(),
+    ?assert(lists:member(filename:join([Dir, "kura_postgres", "ebin"]), Path)),
+    ?assert(lists:member(filename:join([Dir, "minato", "ebin"]), Path)),
+    _ = [code:del_path(filename:join([Dir, D, "ebin"])) || D <- Deps],
+    _ = file:del_dir_r(Dir),
+    ok.
+
+ensure_backend_on_path_aborts_without_backend_test() ->
+    State = fake_state(filename:join(?TMPDIR, "rebar3_kura_path_test_2"), ["kura"]),
+    ?assertThrow(
+        rebar_abort,
+        rebar3_kura_gen_schemas:ensure_backend_on_path(State, #{backend => kura_backend_postgres})
+    ).
