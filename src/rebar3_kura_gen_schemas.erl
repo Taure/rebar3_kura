@@ -14,12 +14,12 @@ migrations from.
 -export([init/1, do/1, format_error/1]).
 
 -ifdef(TEST).
--export([schema_source/2, column_row/1, constraint_row/1]).
+-export([schema_source/2, column_row/1, constraint_row/1, ensure_backend_on_path/2]).
 -endif.
 
 -define(PROVIDER, gen_schemas).
 -define(NAMESPACE, kura).
--define(DEPS, [{default, app_discovery}]).
+-define(DEPS, [{default, install_deps}]).
 
 -doc false.
 -spec init(rebar_state:t()) -> {ok, rebar_state:t()}.
@@ -123,23 +123,24 @@ repos_env(State) ->
 
 ensure_backend_on_path(State, Config) ->
     Backend = maps:get(backend, Config, kura_backend_postgres),
-    case code:ensure_loaded(Backend) of
-        {module, _} ->
-            ok;
-        {error, _} ->
-            add_dep_to_path(State, atom_to_binary(dep_name_for(Backend), utf8))
-    end.
+    DepName = atom_to_binary(dep_name_for(Backend), utf8),
+    AllDeps = rebar_state:all_deps(State),
+    case [D || D <- AllDeps, rebar_app_info:name(D) =:= DepName] of
+        [] -> rebar_api:abort("backend dependency ~s not found", [DepName]);
+        [_] -> ok
+    end,
+    %% The backend's own driver (minato, esqlite) is a transitive dep, and
+    %% start_pool/2 starts it as an application - so its .app has to be
+    %% reachable too, not just the backend's ebin.
+    _ = [code:add_pathz(dep_ebin(D)) || D <- AllDeps],
+    ok.
+
+dep_ebin(App) ->
+    unicode:characters_to_list(filename:join(rebar_app_info:dir(App), "ebin")).
 
 dep_name_for(kura_backend_postgres) -> kura_postgres;
 dep_name_for(kura_backend_sqlite) -> kura_sqlite;
 dep_name_for(Other) -> Other.
-
-add_dep_to_path(State, DepName) ->
-    AllDeps = rebar_state:all_deps(State),
-    case [D || D <- AllDeps, rebar_app_info:name(D) =:= DepName] of
-        [Dep] -> code:add_pathz(filename:join(rebar_app_info:dir(Dep), "ebin"));
-        [] -> rebar_api:abort("backend dependency ~s not found", [DepName])
-    end.
 
 introspect(Config) ->
     Backend = maps:get(backend, Config, kura_backend_postgres),
