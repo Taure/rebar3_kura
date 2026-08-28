@@ -560,34 +560,34 @@ diff_columns(Table, DbCols, DesiredCols) ->
                                 {
                                     EU ++
                                         [
-                                            {execute,
-                                                <<"ALTER TABLE \"", Table/binary,
-                                                    "\" ALTER COLUMN \"", ColBin/binary,
-                                                    "\" DROP NOT NULL">>}
+                                            {execute, <<
+                                                (alter_column(Table, ColBin))/binary,
+                                                " DROP NOT NULL"
+                                            >>}
                                         ],
                                     ED ++
                                         [
-                                            {execute,
-                                                <<"ALTER TABLE \"", Table/binary,
-                                                    "\" ALTER COLUMN \"", ColBin/binary,
-                                                    "\" SET NOT NULL">>}
+                                            {execute, <<
+                                                (alter_column(Table, ColBin))/binary,
+                                                " SET NOT NULL"
+                                            >>}
                                         ]
                                 };
                             false ->
                                 {
                                     EU ++
                                         [
-                                            {execute,
-                                                <<"ALTER TABLE \"", Table/binary,
-                                                    "\" ALTER COLUMN \"", ColBin/binary,
-                                                    "\" SET NOT NULL">>}
+                                            {execute, <<
+                                                (alter_column(Table, ColBin))/binary,
+                                                " SET NOT NULL"
+                                            >>}
                                         ],
                                     ED ++
                                         [
-                                            {execute,
-                                                <<"ALTER TABLE \"", Table/binary,
-                                                    "\" ALTER COLUMN \"", ColBin/binary,
-                                                    "\" DROP NOT NULL">>}
+                                            {execute, <<
+                                                (alter_column(Table, ColBin))/binary,
+                                                " DROP NOT NULL"
+                                            >>}
                                         ]
                                 }
                         end
@@ -691,20 +691,31 @@ on_delete_clause(no_action) -> ~" ON DELETE NO ACTION".
 
 -spec quote(binary()) -> binary().
 quote(Bin) ->
-    <<"\"", Bin/binary, "\"">>.
+    Escaped = binary:replace(Bin, <<"\"">>, <<"\"\"">>, [global]),
+    <<"\"", Escaped/binary, "\"">>.
+
+%% A default is DDL text, not a bind parameter, so an embedded quote has to
+%% be doubled or it closes the literal early.
+-spec quote_literal(binary()) -> binary().
+quote_literal(Bin) ->
+    Escaped = binary:replace(Bin, <<"'">>, <<"''">>, [global]),
+    <<"'", Escaped/binary, "'">>.
 
 default_sql(Table, ColBin, undefined) ->
-    <<"ALTER TABLE \"", Table/binary, "\" ALTER COLUMN \"", ColBin/binary, "\" DROP DEFAULT">>;
+    <<(alter_column(Table, ColBin))/binary, " DROP DEFAULT">>;
 default_sql(Table, ColBin, Val) ->
     ValBin = format_default(Val),
-    <<"ALTER TABLE \"", Table/binary, "\" ALTER COLUMN \"", ColBin/binary, "\" SET DEFAULT ",
-        ValBin/binary>>.
+    <<(alter_column(Table, ColBin))/binary, " SET DEFAULT ", ValBin/binary>>.
+
+-spec alter_column(binary(), binary()) -> binary().
+alter_column(Table, ColBin) ->
+    <<"ALTER TABLE ", (quote(Table))/binary, " ALTER COLUMN ", (quote(ColBin))/binary>>.
 
 format_default(true) -> <<"true">>;
 format_default(false) -> <<"false">>;
 format_default(V) when is_integer(V) -> integer_to_binary(V);
 format_default(V) when is_float(V) -> float_to_binary(V, [{decimals, 10}, compact]);
-format_default(V) when is_binary(V) -> <<"'", V/binary, "'">>;
+format_default(V) when is_binary(V) -> quote_literal(V);
 format_default(V) -> list_to_binary(io_lib:format("~p", [V])).
 
 types_equal({enum, _}, {enum, _}) -> true;
