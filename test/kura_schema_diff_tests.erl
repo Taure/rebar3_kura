@@ -459,6 +459,39 @@ diff_default_removal_test() ->
         [{execute, <<"ALTER TABLE \"t\" ALTER COLUMN \"active\" SET DEFAULT true">>}], Down
     ).
 
+diff_default_escapes_embedded_single_quote_test() ->
+    DbCols = [#kura_column{name = note, type = string, default = undefined}],
+    DesiredCols = [#kura_column{name = note, type = string, default = <<"O'Brien">>}],
+    {Up, _Down} = kura_schema_diff:diff(#{<<"t">> => DbCols}, #{<<"t">> => DesiredCols}),
+    ?assertMatch(
+        [{execute, <<"ALTER TABLE \"t\" ALTER COLUMN \"note\" SET DEFAULT 'O''Brien'">>}],
+        Up
+    ).
+
+diff_doubles_an_embedded_double_quote_in_identifiers_test() ->
+    DbCols = [#kura_column{name = active, type = boolean, default = undefined}],
+    DesiredCols = [#kura_column{name = active, type = boolean, default = true}],
+    {Up, _Down} = kura_schema_diff:diff(
+        #{<<"ev\"il">> => DbCols}, #{<<"ev\"il">> => DesiredCols}
+    ),
+    ?assertMatch(
+        [
+            {execute, <<"ALTER TABLE \"ev\"\"il\" ALTER COLUMN \"active\" SET DEFAULT true">>}
+        ],
+        Up
+    ).
+
+diff_nullable_change_quotes_identifiers_test() ->
+    DbCols = [#kura_column{name = name, type = string, nullable = true}],
+    DesiredCols = [#kura_column{name = name, type = string, nullable = false}],
+    {Up, _Down} = kura_schema_diff:diff(
+        #{<<"ev\"il">> => DbCols}, #{<<"ev\"il">> => DesiredCols}
+    ),
+    ?assertMatch(
+        [{execute, <<"ALTER TABLE \"ev\"\"il\" ALTER COLUMN \"name\" SET NOT NULL">>}],
+        Up
+    ).
+
 diff_combined_type_and_nullable_test() ->
     DbCols = [#kura_column{name = age, type = integer, nullable = true}],
     DesiredCols = [#kura_column{name = age, type = float, nullable = false}],
