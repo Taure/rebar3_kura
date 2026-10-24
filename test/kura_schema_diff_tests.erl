@@ -929,6 +929,30 @@ diff_add_column_down_drops_its_index_first_test() ->
         [{drop_index, ~"t_x_index"}, {alter_table, ~"t", [{drop_column, x}]}], Down
     ).
 
+diff_index_opts_change_drops_before_create_test() ->
+    %% Same columns, so the same generated name: creating first fails 42P07.
+    Cols = [#kura_column{name = id, type = id}, #kura_column{name = e, type = string}],
+    Db = #{columns => #{~"t" => Cols}, indexes => #{~"t" => [{[e], #{}}]}},
+    Desired = #{columns => #{~"t" => Cols}, indexes => #{~"t" => [{[e], #{unique => true}}]}},
+    {Up, Down} = kura_schema_diff:diff(Db, Desired),
+    ?assertEqual(
+        [{drop_index, ~"t_e_index"}, {create_index, ~"t", [e], #{unique => true}}], Up
+    ),
+    ?assertEqual([{drop_index, ~"t_e_index"}, {create_index, ~"t", [e], #{}}], Down).
+
+build_desired_state_index_on_unknown_column_aborts_test() ->
+    meck:new(idx_unknown_schema, [non_strict]),
+    meck:expect(idx_unknown_schema, table, fun() -> ~"t" end),
+    meck:expect(idx_unknown_schema, fields, fun() ->
+        [#kura_field{name = id, type = id, primary_key = true}]
+    end),
+    meck:expect(idx_unknown_schema, indexes, fun() -> [{[gone], #{}}] end),
+    ?assertError(
+        {kura_schema_diff, {index_unknown_column, idx_unknown_schema, gone}},
+        kura_schema_diff:build_desired_state([idx_unknown_schema])
+    ),
+    meck:unload(idx_unknown_schema).
+
 diff_no_index_changes_test() ->
     Db = #{
         columns => #{<<"t">> => [#kura_column{name = id, type = id}]},

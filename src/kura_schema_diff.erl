@@ -79,6 +79,7 @@ desired_state_for(Mod, #{columns := ColAcc, indexes := IdxAcc, unsupported := Un
         Columns = [field_to_column(F) || F <- Fields, F#kura_field.virtual =/= true],
         Enriched = enrich_with_associations(Mod, Columns),
         Indexes = extract_indexes(Mod),
+        ok = check_index_columns(Mod, Indexes, Enriched),
         Acc#{columns => ColAcc#{Table => Enriched}, indexes => IdxAcc#{Table => Indexes}}
     catch
         error:{kura_schema_diff, {composite_assoc_unsupported, _, _} = Reason} ->
@@ -94,6 +95,15 @@ them, paired with the reason. Render each with `format_error/1`.
 -spec unsupported_schemas(db_state()) -> [{module(), term()}].
 unsupported_schemas(State) ->
     maps:get(unsupported, State, []).
+
+%% Otherwise dropping a field emits drop_column and the index declared on it
+%% comes back as a create_index on a column that no longer exists.
+check_index_columns(Mod, Indexes, Columns) ->
+    Known = [C#kura_column.name || C <- Columns],
+    case [Col || {Cols, _} <- Indexes, Col <- Cols, not lists:member(Col, Known)] of
+        [] -> ok;
+        [Col | _] -> error({kura_schema_diff, {index_unknown_column, Mod, Col}})
+    end.
 
 -spec extract_indexes(module()) -> [index_entry()].
 extract_indexes(Mod) ->
@@ -163,8 +173,7 @@ diff(DbState, DesiredState) ->
             {IU, ID} = diff_indexes(Table, DbTableIdx, DesiredTableIdx),
             {DU, CU} = lists:partition(fun is_drop_index/1, IU),
             {DD, CD} = lists:partition(fun is_drop_index/1, ID),
-            %% The same down/0 drops this table, which drops its indexes with
-            %% it on every backend, so a drop_index for one raises 42704.
+            %% down/0 drops this table, and its indexes with it.
             DD2 =
                 case lists:member(Table, NewTables) of
                     true -> [];
@@ -376,6 +385,11 @@ format_error({assoc_key_not_a_field, Mod, Name, FK}) ->
         "~s: association '~s' names foreign key '~s', which is not a field on ~s",
         [Mod, Name, FK, Mod]
     );
+format_error({index_unknown_column, Mod, Col}) ->
+    io_lib:format(
+        "~s: indexes/0 names column '~s', which is not a column of ~s",
+        [Mod, Col, Mod]
+    );
 format_error({composite_assoc_unsupported, Mod, Name}) ->
     io_lib:format(
         "~s: association '~s' has a composite foreign key; the generator cannot "
@@ -426,9 +440,7 @@ apply_ops(
 ) ->
     Cols = maps:get(Name, ColState, []),
     NewCols = apply_alter_ops(AlterOps, Cols),
-    %% Postgres drops every index covering a dropped column along with it,
-    %% and histories written against it rely on that. SQLite refuses such
-    %% a drop, so no history that applied there can disagree.
+    %% Postgres drops every index covering a dropped column with it.
     Dropped = [Col || {drop_column, Col} <- AlterOps],
     Kept = [
         Entry
