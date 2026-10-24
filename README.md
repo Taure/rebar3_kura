@@ -166,8 +166,7 @@ with or without a trailing `;`, and with bare or double-quoted identifiers
 
 - `ALTER TABLE t ALTER [COLUMN] c SET NOT NULL` / `DROP NOT NULL`
 - `ALTER TABLE t ALTER [COLUMN] c SET DEFAULT <literal>` / `DROP DEFAULT`,
-  where a quoted string, a number, `true` or `false` is read as its value and anything else
-  is kept as the expression text
+  where the literal is a quoted string, a number, `true` or `false`
 - `ALTER TABLE t ADD [CONSTRAINT name] FOREIGN KEY (c) REFERENCES p (k)`,
   with optional `ON DELETE` / `ON UPDATE` of `CASCADE`, `RESTRICT`,
   `SET NULL` or `NO ACTION`
@@ -175,15 +174,15 @@ with or without a trailing `;`, and with bare or double-quoted identifiers
   under its custom name or the generated `<table>_<column>_fkey`
 
 A custom constraint name is remembered, so a later regeneration drops and
-re-adds the constraint under that name. A foreign key whose tail is anything
-else (`DEFERRABLE`, `MATCH FULL`, `ON DELETE SET DEFAULT`, ...) is recorded
-as hand-written: the diff leaves it alone while the schema agrees on its
-references, and aborts with `fk_not_owned` rather than regenerate it and
-lose the clause.
+re-adds the constraint under that name. A foreign key whose tail holds
+anything else (`DEFERRABLE`, `MATCH FULL`, `ON DELETE SET DEFAULT`, ...) is
+recorded as hand-written, with any `ON DELETE` it could read: the diff leaves
+it alone while the schema agrees on its references and `ON DELETE`, and
+aborts with `fk_not_owned` rather than regenerate it and lose the clause.
 
 Any other `execute` that names a table in the replayed state (`CREATE
-TRIGGER`, `ADD CHECK`, a multi-column constraint, several statements in one
-string, ...) is not replayed. `compile` and `check` print a warning per
+TRIGGER`, `ADD CHECK`, a multi-column constraint, a default that is an
+expression, several statements in one string, ...) is not replayed. `compile` and `check` print a warning per
 statement, so a drift report that follows one can be read with that in mind.
 
 ### Enum handling

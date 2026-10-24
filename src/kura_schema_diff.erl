@@ -798,25 +798,23 @@ diff_columns(Table, DbCols, DesiredCols, FkMeta) ->
 %% directions drop the old constraint before adding the new one: no dialect
 %% kura targets can change a referential action in place.
 %%
-%% The DB side's constraint keeps the name it was created under, which a
-%% hand-written migration or a column rename may have made something other
-%% than the generated one. A constraint whose clauses replay could not read
-%% is left alone while the schema agrees with its references.
+%% The constraint keeps the name it was created under, which a hand-written
+%% migration or a column rename may have made something other than the
+%% generated one, so a regeneration re-adds it under that name. A constraint
+%% whose clauses replay could not all read is left alone while the schema
+%% agrees with what it could.
 fk_ops(Table, Name, DbCol, DesCol, {FkNames, Unowned}) ->
     DbFk = {DbCol#kura_column.references, DbCol#kura_column.on_delete},
     DesFk = {DesCol#kura_column.references, DesCol#kura_column.on_delete},
-    IsUnowned = maps:is_key({Table, Name}, Unowned),
-    SameRefs = DbCol#kura_column.references =:= DesCol#kura_column.references,
-    case DbFk =:= DesFk orelse (IsUnowned andalso SameRefs) of
+    case DbFk =:= DesFk of
         true ->
             {[], []};
         false ->
-            ok = assert_fk_regenerable(Table, Name, DbCol, IsUnowned),
+            ok = assert_fk_regenerable(Table, Name, DbCol, maps:is_key({Table, Name}, Unowned)),
             DbName = fk_name(FkNames, Table, Name),
-            Generated = fk_constraint_name(Table, Name),
             {
-                fk_transition(Table, Name, {DbCol, DbName}, {DesCol, Generated}),
-                fk_transition(Table, Name, {DesCol, Generated}, {DbCol, DbName})
+                fk_transition(Table, Name, {DbCol, DbName}, {DesCol, DbName}),
+                fk_transition(Table, Name, {DesCol, DbName}, {DbCol, DbName})
             }
     end.
 
@@ -936,9 +934,14 @@ col_map(Cols) ->
 %% kept so the caller can say drift on that table may be false.
 replay_execute(SQL, State) ->
     Stmt = statement(SQL),
-    case replay_statement(Stmt, State) of
-        {ok, NewState} -> NewState;
-        nomatch -> note_unreplayed(SQL, Stmt, State)
+    case binary:match(Stmt, ~";") of
+        nomatch ->
+            case replay_statement(Stmt, State) of
+                {ok, NewState} -> NewState;
+                nomatch -> note_unreplayed(SQL, Stmt, State)
+            end;
+        _ ->
+            note_unreplayed(SQL, Stmt, State)
     end.
 
 %% Trimmed in Erlang rather than by the patterns, whose lazy tail and
@@ -1017,30 +1020,28 @@ names_table(Upper, Table) ->
     Pattern = [~"\\b\\Q", string:uppercase(Table), ~"\\E\\b"],
     re:run(Upper, iolist_to_binary(Pattern), [{capture, none}]) =:= match.
 
-%% An ON DELETE/ON UPDATE tail kura can express is recorded. Anything else
-%% (DEFERRABLE, SET DEFAULT, MATCH FULL, ...) leaves the constraint marked as
-%% hand-written: the diff leaves it alone while the schema agrees with its
-%% references, and refuses to regenerate it otherwise.
+%% An ON DELETE/ON UPDATE kura can express is recorded wherever it sits in the
+%% tail. Anything else (DEFERRABLE, SET DEFAULT, MATCH FULL, ...) also marks the
+%% constraint as hand-written: the diff leaves it alone while the schema agrees
+%% with it, and refuses to regenerate it otherwise.
 parse_fk_actions(Tail) ->
-    fk_actions(string:lexemes(string:uppercase(Tail), " \t\r\n"), #{}).
+    fk_actions(string:lexemes(string:uppercase(Tail), " \t\r\n"), #{}, owned).
 
-fk_actions([], Acc) ->
-    {ok, Acc};
-fk_actions([~"ON", ~"DELETE" | _], #{on_delete := _}) ->
-    {unowned, duplicate_on_delete};
-fk_actions([~"ON", ~"UPDATE" | _], #{on_update := _}) ->
-    {unowned, duplicate_on_update};
-fk_actions([~"ON", Event | Rest], Acc) when Event =:= ~"DELETE"; Event =:= ~"UPDATE" ->
-    case referential_action(Rest) of
-        {ok, Action, Rest1} when Event =:= ~"DELETE" ->
-            fk_actions(Rest1, Acc#{on_delete => Action});
-        {ok, Action, Rest1} ->
-            fk_actions(Rest1, Acc#{on_update => Action});
-        error ->
-            {unowned, Rest}
+fk_actions([], Acc, Ownership) ->
+    {Ownership, Acc};
+fk_actions([~"ON", Event | Rest], Acc, Ownership) when
+    Event =:= ~"DELETE"; Event =:= ~"UPDATE"
+->
+    Key = fk_event(Event),
+    case {maps:is_key(Key, Acc), referential_action(Rest)} of
+        {false, {ok, Action, Rest1}} -> fk_actions(Rest1, Acc#{Key => Action}, Ownership);
+        _ -> fk_actions(Rest, Acc, unowned)
     end;
-fk_actions(Other, _Acc) ->
-    {unowned, Other}.
+fk_actions([_Other | Rest], Acc, _Ownership) ->
+    fk_actions(Rest, Acc, unowned).
+
+fk_event(~"DELETE") -> on_delete;
+fk_event(~"UPDATE") -> on_update.
 
 referential_action([~"CASCADE" | Rest]) -> {ok, cascade, Rest};
 referential_action([~"RESTRICT" | Rest]) -> {ok, restrict, Rest};
@@ -1048,18 +1049,10 @@ referential_action([~"SET", ~"NULL" | Rest]) -> {ok, set_null, Rest};
 referential_action([~"NO", ~"ACTION" | Rest]) -> {ok, no_action, Rest};
 referential_action(_) -> error.
 
-add_fk(Table, Col, Refs, Name, Actions, State) ->
-    {OnDelete, OnUpdate, Unowned} =
-        case Actions of
-            {ok, Parsed} ->
-                {
-                    maps:get(on_delete, Parsed, undefined),
-                    maps:get(on_update, Parsed, undefined),
-                    false
-                };
-            {unowned, _} ->
-                {undefined, undefined, true}
-        end,
+add_fk(Table, Col, Refs, Name, {Ownership, Parsed}, State) ->
+    OnDelete = maps:get(on_delete, Parsed, undefined),
+    OnUpdate = maps:get(on_update, Parsed, undefined),
+    Unowned = Ownership =:= unowned,
     State1 = update_col(Table, Col, {fk, Refs, OnDelete, OnUpdate}, State),
     State2 = put_fk_meta(fk_names, {Table, Col}, name_if_custom(Table, Col, Name), State1),
     put_fk_meta(fk_unowned, {Table, Col}, Unowned, State2).
@@ -1100,8 +1093,13 @@ drop_fk(Table, Constraint, #{columns := ColState} = State) ->
 
 parse_action(Action) ->
     case re:run(Action, ~"(?is)^SET\\s+DEFAULT\\s+(.+)$", [{capture, all_but_first, binary}]) of
-        {match, [Value]} -> {ok, {default, parse_default_value(Value)}};
-        nomatch -> parse_fixed_action(string:lexemes(string:uppercase(Action), " \t\r\n"))
+        {match, [Value]} ->
+            case parse_default_value(Value) of
+                {ok, Default} -> {ok, {default, Default}};
+                error -> nomatch
+            end;
+        nomatch ->
+            parse_fixed_action(string:lexemes(string:uppercase(Action), " \t\r\n"))
     end.
 
 parse_fixed_action([~"SET", ~"NOT", ~"NULL"]) -> {ok, {nullable, false}};
@@ -1109,29 +1107,30 @@ parse_fixed_action([~"DROP", ~"NOT", ~"NULL"]) -> {ok, {nullable, true}};
 parse_fixed_action([~"DROP", ~"DEFAULT"]) -> {ok, {default, undefined}};
 parse_fixed_action(_) -> nomatch.
 
-parse_default_value(~"true") ->
-    true;
-parse_default_value(~"false") ->
-    false;
+%% Only a literal is read. An expression's value is the database's to decide,
+%% so recording its text would compare a string with whatever the schema says.
 parse_default_value(Bin) ->
+    case string:lowercase(Bin) of
+        ~"true" -> {ok, true};
+        ~"false" -> {ok, false};
+        _ -> parse_literal(Bin)
+    end.
+
+parse_literal(Bin) ->
     case re:run(Bin, ~"(?s)^'((?:[^']|'')*)'$", [{capture, all_but_first, binary}]) of
-        {match, [Inner]} -> binary:replace(Inner, ~"''", ~"'", [global]);
+        {match, [Inner]} -> {ok, binary:replace(Inner, ~"''", ~"'", [global])};
         nomatch -> parse_number(Bin)
     end.
 
 parse_number(Bin) ->
-    case binary:match(Bin, ~".") of
-        nomatch ->
+    try
+        {ok, binary_to_integer(Bin)}
+    catch
+        error:badarg ->
             try
-                binary_to_integer(Bin)
+                {ok, binary_to_float(Bin)}
             catch
-                _:_ -> Bin
-            end;
-        _ ->
-            try
-                binary_to_float(Bin)
-            catch
-                _:_ -> Bin
+                error:badarg -> error
             end
     end.
 

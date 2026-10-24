@@ -1701,7 +1701,10 @@ replay_fk_tail_kura_cannot_express_is_left_alone_test() ->
     ),
     ?assertEqual({~"users", id}, (col(State, ~"k", u_id))#kura_column.references),
     ?assertEqual({[], []}, kura_schema_diff:diff(State, fk_desired(State, ~"k", u_id, cascade))),
-    ?assertEqual({[], []}, kura_schema_diff:diff(State, fk_desired(State, ~"k", u_id, restrict))),
+    ?assertError(
+        {kura_schema_diff, {fk_not_owned, ~"k", u_id}},
+        kura_schema_diff:diff(State, fk_desired(State, ~"k", u_id, restrict))
+    ),
     Elsewhere = (fk_desired(State, ~"k", u_id, cascade)),
     #{columns := #{~"k" := KCols} = DesCols} = Elsewhere,
     Moved = [
@@ -1725,7 +1728,13 @@ diff_drops_a_custom_named_fk_by_its_name_test() ->
             ]
     ),
     {Up, Down} = kura_schema_diff:diff(State, fk_desired(State, ~"k", u_id, cascade)),
-    ?assertMatch([{execute, ~"ALTER TABLE \"k\" DROP CONSTRAINT \"fk_u\""}, {execute, _}], Up),
+    ?assertMatch(
+        [
+            {execute, ~"ALTER TABLE \"k\" DROP CONSTRAINT \"fk_u\""},
+            {execute, <<"ALTER TABLE \"k\" ADD CONSTRAINT \"fk_u\"", _/binary>>}
+        ],
+        Up
+    ),
     ?assertMatch(
         [{execute, _}, {execute, <<"ALTER TABLE \"k\" ADD CONSTRAINT \"fk_u\"", _/binary>>}], Down
     ),
@@ -1802,21 +1811,64 @@ replay_default_round_trips_an_escaped_quote_test() ->
     ]),
     ?assertEqual(~"it's", (col(State, ~"t", c))#kura_column.default).
 
-replay_default_that_is_not_a_plain_literal_is_kept_as_text_test() ->
+replay_default_expression_is_not_replayed_test() ->
+    [
+        begin
+            SQL = <<"ALTER TABLE t ALTER COLUMN c SET DEFAULT ", Value/binary>>,
+            State = replay([
+                {create_table, ~"t", [#kura_column{name = c, type = string}]},
+                {execute, SQL}
+            ]),
+            ?assertEqual(undefined, (col(State, ~"t", c))#kura_column.default),
+            ?assertEqual([SQL], kura_schema_diff:unreplayed_executes(State))
+        end
+     || Value <- [~"'x'::text", ~"'", ~"now()", ~"nextval('s')", ~"1e5"]
+    ].
+
+replay_default_literals_ignore_case_test() ->
     [
         ?assertEqual(
             Expected,
             (col(
                 replay([
-                    {create_table, ~"t", [#kura_column{name = c, type = string}]},
+                    {create_table, ~"t", [#kura_column{name = c, type = boolean}]},
                     {execute, <<"ALTER TABLE t ALTER COLUMN c SET DEFAULT ", Value/binary>>}
                 ]),
                 ~"t",
                 c
             ))#kura_column.default
         )
-     || {Value, Expected} <- [{~"'x'::text", ~"'x'::text"}, {~"'", ~"'"}, {~"now()", ~"now()"}]
+     || {Value, Expected} <- [{~"TRUE", true}, {~"False", false}, {~"-3", -3}, {~"1.5", 1.5}]
     ].
+
+replay_fk_action_after_an_unreadable_one_is_recorded_test() ->
+    State = replay(
+        users_and(~"k", [#kura_column{name = u_id, type = integer}]) ++
+            [
+                {execute,
+                    ~"ALTER TABLE k ADD FOREIGN KEY (u_id) REFERENCES users(id) ON DELETE SET DEFAULT ON UPDATE CASCADE"}
+            ]
+    ),
+    ?assertEqual(cascade, (col(State, ~"k", u_id))#kura_column.on_update).
+
+replay_several_statements_are_not_replayed_test() ->
+    SQL = ~"ALTER TABLE k ADD FOREIGN KEY (u_id) REFERENCES users(id); DROP TABLE k",
+    State = replay(
+        users_and(~"k", [#kura_column{name = u_id, type = integer}]) ++ [{execute, SQL}]
+    ),
+    ?assertEqual(undefined, (col(State, ~"k", u_id))#kura_column.references),
+    ?assertEqual([SQL], kura_schema_diff:unreplayed_executes(State)).
+
+replay_fk_on_delete_after_an_unknown_clause_is_recorded_test() ->
+    State = replay(
+        users_and(~"k", [#kura_column{name = u_id, type = integer}]) ++
+            [
+                {execute,
+                    ~"ALTER TABLE k ADD FOREIGN KEY (u_id) REFERENCES users(id) DEFERRABLE ON DELETE CASCADE"}
+            ]
+    ),
+    ?assertEqual(cascade, (col(State, ~"k", u_id))#kura_column.on_delete),
+    ?assertEqual({[], []}, kura_schema_diff:diff(State, fk_desired(State, ~"k", u_id, cascade))).
 
 replay_unknown_column_is_not_an_atom_leak_test() ->
     State = replay([
