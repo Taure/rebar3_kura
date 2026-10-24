@@ -2070,3 +2070,95 @@ replay_reports_a_table_whose_name_holds_regex_syntax_test() ->
         {create_table, ~"a\\Eb(", [#kura_column{name = c, type = string}]}, {execute, SQL}
     ]),
     ?assertEqual([SQL], kura_schema_diff:unreplayed_executes(State)).
+
+replay_rename_keeps_a_hand_written_fk_unowned_test() ->
+    State = replay(
+        users_and(~"k", [#kura_column{name = u_id, type = integer}]) ++
+            [
+                {execute, ~"ALTER TABLE k ADD FOREIGN KEY (u_id) REFERENCES users(id) DEFERRABLE"},
+                {alter_table, ~"k", [{rename_column, u_id, owner_id}]}
+            ]
+    ),
+    ?assertError(
+        {kura_schema_diff, {fk_not_owned, ~"k", owner_id}},
+        kura_schema_diff:diff(State, fk_desired(State, ~"k", owner_id, cascade))
+    ).
+
+replay_recreated_table_forgets_the_old_fk_meta_test() ->
+    State = replay(
+        users_and(~"k", [#kura_column{name = u_id, type = integer}]) ++
+            [
+                {execute,
+                    ~"ALTER TABLE k ADD CONSTRAINT fk_u FOREIGN KEY (u_id) REFERENCES users(id) DEFERRABLE"},
+                {drop_table, ~"k"},
+                {create_table, ~"k", [
+                    #kura_column{name = u_id, type = integer, references = {~"users", id}}
+                ]}
+            ]
+    ),
+    {Up, _} = kura_schema_diff:diff(State, fk_desired(State, ~"k", u_id, cascade)),
+    ?assertMatch([{execute, ~"ALTER TABLE \"k\" DROP CONSTRAINT \"k_u_id_fkey\""} | _], Up).
+
+replay_readded_column_forgets_the_old_fk_meta_test() ->
+    State = replay(
+        users_and(~"k", [#kura_column{name = u_id, type = integer}]) ++
+            [
+                {execute,
+                    ~"ALTER TABLE k ADD CONSTRAINT fk_u FOREIGN KEY (u_id) REFERENCES users(id) DEFERRABLE"},
+                {alter_table, ~"k", [{drop_column, u_id}]},
+                {alter_table, ~"k", [
+                    {add_column, #kura_column{
+                        name = u_id, type = integer, references = {~"users", id}
+                    }}
+                ]}
+            ]
+    ),
+    {Up, _} = kura_schema_diff:diff(State, fk_desired(State, ~"k", u_id, cascade)),
+    ?assertMatch([{execute, ~"ALTER TABLE \"k\" DROP CONSTRAINT \"k_u_id_fkey\""} | _], Up).
+
+replay_repeated_on_delete_is_hand_written_test() ->
+    State = replay(
+        users_and(~"k", [#kura_column{name = u_id, type = integer}]) ++
+            [
+                {execute,
+                    ~"ALTER TABLE k ADD FOREIGN KEY (u_id) REFERENCES users(id) ON DELETE CASCADE ON DELETE RESTRICT"}
+            ]
+    ),
+    ?assertError(
+        {kura_schema_diff, {fk_not_owned, ~"k", u_id}},
+        kura_schema_diff:diff(State, fk_desired(State, ~"k", u_id, restrict))
+    ).
+
+diff_drops_the_index_whose_options_differ_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = a, type = string}]},
+        {create_index, ~"t_a_unique", ~"t", [a], [unique]},
+        {create_index, ~"t_a_plain", ~"t", [a], []}
+    ]),
+    Desired = #{columns => cols(State), indexes => #{~"t" => [{[a], #{unique => true}}]}},
+    ?assertEqual(
+        {[{drop_index, ~"t_a_plain"}], [{create_index, ~"t_a_plain", ~"t", [a], []}]},
+        kura_schema_diff:diff(State, Desired)
+    ).
+
+diff_recreates_an_unnamed_index_under_its_generated_name_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = a, type = string}]},
+        {create_index, ~"t", [a], #{unique => true}}
+    ]),
+    Desired = #{columns => cols(State), indexes => #{~"t" => []}},
+    ?assertEqual(
+        {[{drop_index, ~"t_a_index"}], [{create_index, ~"t", [a], #{unique => true}}]},
+        kura_schema_diff:diff(State, Desired)
+    ).
+
+diff_recreates_an_index_named_as_generated_without_its_name_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = a, type = string}]},
+        {create_index, ~"t_a_index", ~"t", [a], [unique]}
+    ]),
+    Desired = #{columns => cols(State), indexes => #{~"t" => []}},
+    ?assertEqual(
+        {[{drop_index, ~"t_a_index"}], [{create_index, ~"t", [a], #{unique => true}}]},
+        kura_schema_diff:diff(State, Desired)
+    ).
