@@ -1891,6 +1891,15 @@ unreplayed_executes_name_a_known_table_test() ->
         kura_schema_diff:unreplayed_executes(State)
     ).
 
+unreplayed_executes_skip_dml_test() ->
+    State = replay([
+        {create_table, ~"users", [#kura_column{name = email, type = string}]},
+        {execute, ~"UPDATE users SET email = lower(email)"},
+        {execute, ~"INSERT INTO users (email) VALUES ('a@b')"},
+        {execute, ~"DELETE FROM users WHERE email IS NULL"}
+    ]),
+    ?assertEqual([], kura_schema_diff:unreplayed_executes(State)).
+
 replay_rename_rewrites_a_partial_index_where_test() ->
     Base = [
         {create_table, ~"t", [
@@ -1903,6 +1912,14 @@ replay_rename_rewrites_a_partial_index_where_test() ->
     ?assertMatch([{[user_id], #{where := ~"new IS NULL"}}], maps:get(~"t", idxs(replay(Base)))),
     Dropped = replay(Base ++ [{alter_table, ~"t", [{drop_column, new}]}]),
     ?assertEqual([], maps:get(~"t", idxs(Dropped))).
+
+replay_rename_to_a_column_with_replacement_characters_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = old, type = utc_datetime}]},
+        {create_index, ~"t", [old], #{where => ~"old IS NULL"}},
+        {alter_table, ~"t", [{rename_column, old, 'a&b\\1'}]}
+    ]),
+    ?assertMatch([{_, #{where := ~"a&b\\1 IS NULL"}}], maps:get(~"t", idxs(State))).
 
 diff_after_a_rename_matches_the_schema_by_structure_test() ->
     %% kura_schema_verify matches indexes by columns, uniqueness and WHERE,

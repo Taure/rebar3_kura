@@ -555,10 +555,14 @@ rename_entry(Table, Old, New, {Cols, Opts} = E) ->
 
 rename_in_where(#{where := Where} = Opts, Old, New) when is_binary(Where) ->
     Opts#{
-        where => re:replace(Where, column_word(Old), atom_to_binary(New), [global, {return, binary}])
+        where => re:replace(Where, column_word(Old), replacement(New), [global, {return, binary}])
     };
 rename_in_where(Opts, _Old, _New) ->
     Opts.
+
+%% `&` and `\` mean something in a re:replace replacement.
+replacement(Col) ->
+    binary:replace(atom_to_binary(Col), [<<$\\>>, <<$&>>], <<$\\>>, [global, {insert_replaced, 1}]).
 
 index_uses({Cols, Opts}, Col) ->
     lists:member(Col, Cols) orelse
@@ -1009,11 +1013,22 @@ existing_atom(Bin) ->
 constraint_name(Table, Col, <<>>) -> fk_constraint_name(Table, Col);
 constraint_name(_Table, _Col, Name) -> Name.
 
+%% Only DDL can change what a table looks like; a backfill that names the
+%% table does not.
 note_unreplayed(SQL, Stmt, #{columns := Cols} = State) ->
     Upper = string:uppercase(Stmt),
-    case lists:any(fun(Table) -> names_table(Upper, Table) end, maps:keys(Cols)) of
+    case
+        is_ddl(Upper) andalso
+            lists:any(fun(Table) -> names_table(Upper, Table) end, maps:keys(Cols))
+    of
         true -> State#{unreplayed => maps:get(unreplayed, State, []) ++ [SQL]};
         false -> State
+    end.
+
+is_ddl(Upper) ->
+    case string:lexemes(Upper, " \t\r\n(") of
+        [Verb | _] -> lists:member(Verb, [~"ALTER", ~"CREATE", ~"DROP"]);
+        [] -> false
     end.
 
 names_table(Upper, Table) ->
