@@ -172,13 +172,51 @@ is_schema_file_test() ->
     ?assert(is_schema_file(AmericanSchema)),
     cleanup_dir(Dir).
 
+%% Names and SQL reach the generated source from schemas and migration
+%% history. Whatever they hold, the module must compile and hand back exactly
+%% the operations it was rendered from.
+generated_source_round_trips_hostile_text_test_() ->
+    Texts = [
+        ~"plain",
+        ~"quote\"inside",
+        ~"back\\slash",
+        ~"\\\"",
+        ~"tilde~s~p",
+        ~"line\nbreak",
+        ~"'^\\d+\\n$'",
+        ~"x\"), erlang:display(pwned), (\""
+    ],
+    [
+        {binary_to_list(T), ?_test(assert_round_trip(T))}
+     || T <- Texts
+    ].
+
+assert_round_trip(Text) ->
+    Col = #kura_column{name = a, type = string, references = {Text, id}},
+    UpOps = [
+        {create_table, Text, [Col]},
+        {alter_table, Text, [{add_column, Col}]},
+        {create_index, Text, [a], #{where => Text}},
+        {create_index, Text, Text, [a], [unique, {where, Text}]},
+        {execute, Text}
+    ],
+    DownOps = [{drop_index, Text}, {drop_table, Text}],
+    Desc = binary_to_list(binary:encode_hex(crypto:hash(md5, Text))),
+    {ok, Mod} = compile_generated_migration("round_trip_" ++ Desc, UpOps, DownOps),
+    try
+        ?assertEqual(UpOps, Mod:up()),
+        ?assertEqual(DownOps, Mod:down())
+    after
+        cleanup_mod(Mod)
+    end.
+
 %%====================================================================
 %% Helpers
 %%====================================================================
 
 compile_generated_migration(Desc, UpOps, DownOps) ->
     ModName = "m_test_" ++ Desc,
-    Source = render_migration(ModName, UpOps, DownOps),
+    Source = rebar3_kura_compile:render_migration(ModName, UpOps, DownOps),
     Dir = make_temp_dir(),
     File = filename:join(Dir, ModName ++ ".erl"),
     ok = file:write_file(File, Source),
@@ -199,97 +237,6 @@ compile_generated_migration(Desc, UpOps, DownOps) ->
 cleanup_mod(Mod) ->
     code:purge(Mod),
     code:delete(Mod).
-
-%% Replicate the render logic from rebar3_kura_compile (since it's not exported)
-render_migration(ModName, UpOps, DownOps) ->
-    io_lib:format(
-        "-module(~s).~n"
-        "-moduledoc false.~n"
-        "-behaviour(kura_migration).~n"
-        "-include_lib(\"kura/include/kura.hrl\").~n"
-        "-export([up/0, down/0]).~n"
-        "~n"
-        "-spec up() -> [kura_migration:operation()].~n"
-        "up() ->~n"
-        "    ~s.~n"
-        "~n"
-        "-spec down() -> [kura_migration:operation()].~n"
-        "down() ->~n"
-        "    ~s.~n",
-        [ModName, render_ops(UpOps), render_ops(DownOps)]
-    ).
-
-render_ops(Ops) ->
-    Inner = lists:join(",\n     ", [render_op(Op) || Op <- Ops]),
-    io_lib:format("[~s]", [Inner]).
-
-render_op({create_table, Table, Cols}) ->
-    ColStrs = lists:join(",\n        ", [render_column(C) || C <- Cols]),
-    io_lib:format("{create_table, ~~\"~s\", [~n        ~s~n    ]}", [Table, ColStrs]);
-render_op({drop_table, Table}) ->
-    io_lib:format("{drop_table, ~~\"~s\"}", [Table]);
-render_op({alter_table, Table, AlterOps}) ->
-    OpStrs = lists:join(",\n        ", [render_alter_op(Op) || Op <- AlterOps]),
-    io_lib:format("{alter_table, ~~\"~s\", [~n        ~s~n    ]}", [Table, OpStrs]);
-render_op({execute, SQL}) ->
-    Escaped = string:replace(binary_to_list(SQL), "\"", "\\\"", all),
-    io_lib:format("{execute, ~~\"~s\"}", [Escaped]).
-
-render_alter_op({add_column, Col}) ->
-    io_lib:format("{add_column, ~s}", [render_column(Col)]);
-render_alter_op({drop_column, Name}) ->
-    io_lib:format("{drop_column, ~p}", [Name]);
-render_alter_op({modify_column, Name, Type}) ->
-    io_lib:format("{modify_column, ~p, ~p}", [Name, Type]);
-render_alter_op({rename_column, Old, New}) ->
-    io_lib:format("{rename_column, ~p, ~p}", [Old, New]).
-
-render_column(#kura_column{
-    name = N,
-    type = T,
-    nullable = Null,
-    default = Def,
-    primary_key = PK,
-    references = Refs,
-    on_delete = OnDel,
-    on_update = OnUpd
-}) ->
-    Parts = [io_lib:format("name = ~p", [N]), io_lib:format("type = ~p", [T])],
-    Parts2 =
-        case PK of
-            true -> Parts ++ ["primary_key = true"];
-            false -> Parts
-        end,
-    Parts3 =
-        case Null of
-            false -> Parts2 ++ ["nullable = false"];
-            true -> Parts2
-        end,
-    Parts4 =
-        case Def of
-            undefined -> Parts3;
-            _ -> Parts3 ++ [io_lib:format("default = ~p", [Def])]
-        end,
-    Parts5 =
-        case Refs of
-            undefined ->
-                Parts4;
-            {RefTable, RefCol} ->
-                Parts4 ++ [io_lib:format("references = {~~\"~s\", ~p}", [RefTable, RefCol])];
-            _ ->
-                Parts4 ++ [io_lib:format("references = ~p", [Refs])]
-        end,
-    Parts6 =
-        case OnDel of
-            undefined -> Parts5;
-            _ -> Parts5 ++ [io_lib:format("on_delete = ~p", [OnDel])]
-        end,
-    Parts7 =
-        case OnUpd of
-            undefined -> Parts6;
-            _ -> Parts6 ++ [io_lib:format("on_update = ~p", [OnUpd])]
-        end,
-    io_lib:format("#kura_column{~s}", [lists:join(", ", Parts7)]).
 
 is_schema_file(File) ->
     {ok, Bin} = file:read_file(File),

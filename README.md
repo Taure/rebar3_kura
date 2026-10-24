@@ -155,6 +155,40 @@ Targets that live in a dependency resolve too - every dependency's and
 sibling app's `ebin` is added to the code path before the diff runs, which is
 what lets an extension application ship schemas the host references.
 
+### Hand-written `execute` in migration history
+
+The diff replays the migration history to work out what the database looks
+like, so a hand-written `{execute, SQL}` that changes a table kura generates
+has to be understood or the next run reports drift that is not there. One
+statement per `execute` is read, case-insensitively, across any whitespace,
+with or without a trailing `;`, and with bare or double-quoted identifiers
+(bare ones fold to lower case, as PostgreSQL folds them):
+
+- `ALTER TABLE t ALTER [COLUMN] c SET NOT NULL` / `DROP NOT NULL`
+- `ALTER TABLE t ALTER [COLUMN] c SET DEFAULT <literal>` / `DROP DEFAULT`,
+  where the literal is a quoted string, a number without an exponent,
+  `true`, `false` or `NULL`
+- `ALTER TABLE t ADD [CONSTRAINT name] FOREIGN KEY (c) REFERENCES p (k)`,
+  with optional `ON DELETE` / `ON UPDATE` of `CASCADE`, `RESTRICT`,
+  `SET NULL` or `NO ACTION`
+- `ALTER TABLE t DROP CONSTRAINT name`, for a foreign key replay recorded,
+  under its custom name or the generated `<table>_<column>_fkey`
+
+A custom constraint name is remembered, so a later regeneration drops and
+re-adds the constraint under that name. A foreign key whose tail holds
+anything else (`DEFERRABLE`, `MATCH FULL`, `ON DELETE SET DEFAULT`, ...) is
+recorded as hand-written, with any `ON DELETE` it could read: the diff leaves
+it alone while the schema agrees on its references and `ON DELETE`, and
+aborts with `fk_not_owned` rather than regenerate it and lose the clause.
+
+Each of these must name a table and column replay knows about, and a
+`DROP CONSTRAINT` a foreign key it recorded. Any other `execute` that names a
+table in the replayed state and holds `ALTER`, `CREATE` or `DROP` outside a
+quoted string (`CREATE TRIGGER`, `ADD CHECK`, a multi-column constraint, a
+default that is an expression, a `DO` block, several statements in one string,
+...) is not replayed. `compile` and `check` print a warning per statement, so
+a drift report that follows one can be read with that in mind.
+
 ### Enum handling
 
 Enum fields (`{enum, [atom()]}`) map to `VARCHAR(255)`. Changing the enum value list doesn't trigger a migration since the underlying column type is unchanged.

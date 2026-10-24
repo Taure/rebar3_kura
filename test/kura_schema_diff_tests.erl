@@ -11,7 +11,10 @@ idxs(State) -> maps:get(indexes, State).
 %%====================================================================
 
 build_db_state_empty_test() ->
-    ?assertEqual(#{columns => #{}, indexes => #{}}, kura_schema_diff:build_db_state([])).
+    State = kura_schema_diff:build_db_state([]),
+    ?assertEqual(#{}, maps:get(columns, State)),
+    ?assertEqual(#{}, maps:get(indexes, State)),
+    ?assertEqual([], kura_schema_diff:unreplayed_executes(State)).
 
 build_db_state_create_table_test() ->
     meck:new(m_create, [non_strict]),
@@ -784,7 +787,8 @@ build_db_state_tracks_5tuple_indexes_test() ->
     end),
     State = kura_schema_diff:build_db_state([m_idx5]),
     IdxState = idxs(State),
-    ?assertEqual([{[id], #{unique => true}}], maps:get(<<"t">>, IdxState)),
+    %% The explicit name is kept: drop_index names the index, not its columns.
+    ?assertEqual([{[id], #{unique => true, name => ~"t_id_index"}}], maps:get(~"t", IdxState)),
     meck:unload(m_idx5).
 
 build_db_state_drop_index_test() ->
@@ -1460,3 +1464,701 @@ apply_alter_ops_ext([{modify_column, Name, Type} | Rest], Cols) ->
      || C <- Cols
     ],
     apply_alter_ops_ext(Rest, NewCols).
+
+%%====================================================================
+%% Replay fidelity: history that matches the schema reports no drift
+%%====================================================================
+
+replay(Ops) ->
+    Mod = list_to_atom("m_replay_" ++ integer_to_list(erlang:unique_integer([positive]))),
+    meck:new(Mod, [non_strict]),
+    meck:expect(Mod, up, fun() -> Ops end),
+    try
+        kura_schema_diff:build_db_state([Mod])
+    after
+        meck:unload(Mod)
+    end.
+
+col(State, Table, Name) ->
+    [Col] = [C || C <- maps:get(Table, cols(State)), C#kura_column.name =:= Name],
+    Col.
+
+users_and(Table, Cols) ->
+    [
+        {create_table, ~"users", [#kura_column{name = id, type = id, primary_key = true}]},
+        {create_table, Table, [#kura_column{name = id, type = id, primary_key = true} | Cols]}
+    ].
+
+fk_desired(State, Table, Col, OnDelete) ->
+    Cols = cols(State),
+    Changed = [
+        case C#kura_column.name of
+            Col ->
+                C#kura_column{
+                    references = {~"users", id}, on_delete = OnDelete, on_update = undefined
+                };
+            _ ->
+                C
+        end
+     || C <- maps:get(Table, Cols)
+    ],
+    #{columns => Cols#{Table => Changed}, indexes => idxs(State)}.
+
+replay_hand_written_unquoted_fk_test() ->
+    State = replay([
+        {create_table, ~"users", [#kura_column{name = id, type = id, primary_key = true}]},
+        {create_table, ~"user_tokens", [
+            #kura_column{name = id, type = id, primary_key = true},
+            #kura_column{name = user_id, type = integer, nullable = false}
+        ]},
+        {execute,
+            ~"ALTER TABLE user_tokens ADD CONSTRAINT user_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"}
+    ]),
+    C = col(State, ~"user_tokens", user_id),
+    ?assertEqual({~"users", id}, C#kura_column.references),
+    ?assertEqual(cascade, C#kura_column.on_delete).
+
+replay_lowercase_alter_column_test() ->
+    State = replay([
+        {create_table, ~"pets", [#kura_column{name = name, type = string}]},
+        {execute, ~"alter table pets alter column name set not null;"}
+    ]),
+    ?assertEqual(false, (col(State, ~"pets", name))#kura_column.nullable).
+
+replay_quoted_identifier_with_embedded_quote_test() ->
+    State = replay([
+        {create_table, ~"we\"ird", [#kura_column{name = c, type = string}]},
+        {execute, ~"ALTER TABLE \"we\"\"ird\" ALTER COLUMN \"c\" SET DEFAULT 'x'"}
+    ]),
+    ?assertEqual(~"x", (col(State, ~"we\"ird", c))#kura_column.default).
+
+diff_primary_key_is_not_null_either_way_test() ->
+    %% A migration usually leaves nullable at its default on the key column;
+    %% the schema often spells out nullable = false. Postgres has it NOT NULL.
+    Db = #{~"t" => [#kura_column{name = id, type = id, primary_key = true}]},
+    Desired = #{
+        ~"t" => [#kura_column{name = id, type = id, primary_key = true, nullable = false}]
+    },
+    ?assertEqual({[], []}, kura_schema_diff:diff(Db, Desired)).
+
+replay_drop_index_by_explicit_name_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = a, type = string}]},
+        {create_index, ~"custom_name", ~"t", [a], []},
+        {drop_index, ~"custom_name"}
+    ]),
+    ?assertEqual([], maps:get(~"t", idxs(State))).
+
+diff_drops_a_named_index_by_its_name_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = a, type = string}]},
+        {create_index, ~"custom_name", ~"t", [a], []}
+    ]),
+    Desired = #{columns => cols(State), indexes => #{~"t" => []}},
+    {Up, _Down} = kura_schema_diff:diff(State, Desired),
+    ?assertEqual([{drop_index, ~"custom_name"}], Up).
+
+replay_rename_then_drop_column_drops_its_index_test() ->
+    %% Taure/rebar3_kura#49
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = old, type = string}]},
+        {create_index, ~"t", [old], #{}},
+        {alter_table, ~"t", [{rename_column, old, new}]},
+        {alter_table, ~"t", [{drop_column, new}]}
+    ]),
+    ?assertEqual([], maps:get(~"t", idxs(State))).
+
+diff_drops_a_renamed_columns_index_by_its_original_name_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = old, type = string}]},
+        {create_index, ~"t", [old], #{}},
+        {alter_table, ~"t", [{rename_column, old, new}]}
+    ]),
+    ?assertMatch([{[new], _}], maps:get(~"t", idxs(State))),
+    Desired = #{columns => cols(State), indexes => #{~"t" => []}},
+    {Up, _Down} = kura_schema_diff:diff(State, Desired),
+    ?assertEqual([{drop_index, ~"t_old_index"}], Up).
+
+replay_drop_column_named_in_a_partial_index_where_test() ->
+    %% Taure/rebar3_kura#49
+    State = replay([
+        {create_table, ~"t", [
+            #kura_column{name = a, type = string},
+            #kura_column{name = deleted_at, type = utc_datetime},
+            #kura_column{name = deleted_by, type = string}
+        ]},
+        {create_index, ~"t", [a], #{where => ~"deleted_at IS NULL"}},
+        {create_index, ~"t_a_by", ~"t", [a], [{where, ~"deleted_by IS NULL"}]},
+        {alter_table, ~"t", [{drop_column, deleted_at}]}
+    ]),
+    ?assertMatch([{[a], #{name := ~"t_a_by"}}], maps:get(~"t", idxs(State))).
+
+pet_store_auth_history_matches_its_schemas_test() ->
+    %% The history and schemas from Taure/kura#178: consistent, yet the
+    %% differ asked to drop three live indexes, re-add an existing foreign
+    %% key and SET NOT NULL on two primary keys.
+    Db = replay([
+        {execute, ~"CREATE EXTENSION IF NOT EXISTS citext"},
+        {create_table, ~"users", [
+            #kura_column{name = id, type = id, primary_key = true},
+            #kura_column{name = email, type = string, nullable = false}
+        ]},
+        {create_index, ~"users_email_index", ~"users", [email], [unique]},
+        {create_table, ~"user_tokens", [
+            #kura_column{name = id, type = id, primary_key = true},
+            #kura_column{name = user_id, type = integer, nullable = false},
+            #kura_column{name = token, type = string, nullable = false},
+            #kura_column{name = context, type = string, nullable = false}
+        ]},
+        {create_index, ~"user_tokens_user_id_index", ~"user_tokens", [user_id], []},
+        {create_index, ~"user_tokens_context_token_index", ~"user_tokens", [context, token], [
+            unique
+        ]},
+        {execute,
+            ~"ALTER TABLE user_tokens ADD CONSTRAINT user_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"}
+    ]),
+    Desired = #{
+        columns => #{
+            ~"users" => [
+                #kura_column{name = id, type = id, primary_key = true, nullable = false},
+                #kura_column{name = email, type = string, nullable = false}
+            ],
+            ~"user_tokens" => [
+                #kura_column{name = id, type = id, primary_key = true, nullable = false},
+                #kura_column{
+                    name = user_id,
+                    type = integer,
+                    nullable = false,
+                    references = {~"users", id},
+                    on_delete = cascade
+                },
+                #kura_column{name = token, type = string, nullable = false},
+                #kura_column{name = context, type = string, nullable = false}
+            ]
+        },
+        indexes => #{
+            ~"users" => [{[email], #{unique => true}}],
+            ~"user_tokens" => [{[user_id], #{}}, {[context, token], #{unique => true}}]
+        }
+    },
+    ?assertEqual({[], []}, kura_schema_diff:diff(Db, Desired)).
+
+replay_lowercase_semicolon_fk_and_drop_test() ->
+    Base =
+        users_and(~"k", [#kura_column{name = u_id, type = integer}]) ++
+            [
+                {execute,
+                    ~"  alter table k add constraint k_u_id_fkey foreign key (u_id) references users (id) on delete cascade;"}
+            ],
+    Added = col(replay(Base), ~"k", u_id),
+    ?assertEqual({~"users", id}, Added#kura_column.references),
+    ?assertEqual(cascade, Added#kura_column.on_delete),
+    Dropped = col(
+        replay(Base ++ [{execute, ~"alter table k drop constraint k_u_id_fkey;"}]), ~"k", u_id
+    ),
+    ?assertEqual(undefined, Dropped#kura_column.references).
+
+replay_quoted_fk_identifiers_with_embedded_quotes_test() ->
+    State = replay([
+        {create_table, ~"us\"ers", [#kura_column{name = id, type = id, primary_key = true}]},
+        {create_table, ~"k", [#kura_column{name = u_id, type = integer}]},
+        {execute,
+            ~"ALTER TABLE \"k\" ADD CONSTRAINT \"k\"\"fk\" FOREIGN KEY (\"u_id\") REFERENCES \"us\"\"ers\" (\"id\")"},
+        {execute, ~"ALTER TABLE \"k\" DROP CONSTRAINT \"k\"\"fk\""}
+    ]),
+    ?assertEqual(undefined, (col(State, ~"k", u_id))#kura_column.references),
+    Kept = replay([
+        {create_table, ~"us\"ers", [#kura_column{name = id, type = id, primary_key = true}]},
+        {create_table, ~"k", [#kura_column{name = u_id, type = integer}]},
+        {execute,
+            ~"ALTER TABLE \"k\" ADD CONSTRAINT \"k\"\"fk\" FOREIGN KEY (\"u_id\") REFERENCES \"us\"\"ers\" (\"id\")"}
+    ]),
+    ?assertEqual({~"us\"ers", id}, (col(Kept, ~"k", u_id))#kura_column.references).
+
+replay_fk_on_update_is_recorded_test() ->
+    State = replay(
+        users_and(~"k", [#kura_column{name = u_id, type = integer}]) ++
+            [
+                {execute,
+                    ~"ALTER TABLE k ADD CONSTRAINT k_u_id_fkey FOREIGN KEY (u_id) REFERENCES users(id) ON DELETE CASCADE ON UPDATE CASCADE"}
+            ]
+    ),
+    C = col(State, ~"k", u_id),
+    ?assertEqual({cascade, cascade}, {C#kura_column.on_delete, C#kura_column.on_update}),
+    %% Regenerating the constraint would drop ON UPDATE, so changing it is refused.
+    ?assertError(
+        {kura_schema_diff, {fk_on_update_not_owned, ~"k", u_id, cascade}},
+        kura_schema_diff:diff(State, fk_desired(State, ~"k", u_id, restrict))
+    ).
+
+replay_fk_tail_kura_cannot_express_is_left_alone_test() ->
+    State = replay(
+        users_and(~"k", [#kura_column{name = u_id, type = integer}]) ++
+            [
+                {execute,
+                    ~"ALTER TABLE k ADD CONSTRAINT k_u_id_fkey FOREIGN KEY (u_id) REFERENCES users(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED"}
+            ]
+    ),
+    ?assertEqual({~"users", id}, (col(State, ~"k", u_id))#kura_column.references),
+    ?assertEqual({[], []}, kura_schema_diff:diff(State, fk_desired(State, ~"k", u_id, cascade))),
+    ?assertError(
+        {kura_schema_diff, {fk_not_owned, ~"k", u_id}},
+        kura_schema_diff:diff(State, fk_desired(State, ~"k", u_id, restrict))
+    ),
+    Elsewhere = fk_desired(State, ~"k", u_id, cascade),
+    #{columns := #{~"k" := KCols} = DesCols} = Elsewhere,
+    Moved = [
+        case C#kura_column.name of
+            u_id -> C#kura_column{references = {~"users", other}};
+            _ -> C
+        end
+     || C <- KCols
+    ],
+    ?assertError(
+        {kura_schema_diff, {fk_not_owned, ~"k", u_id}},
+        kura_schema_diff:diff(State, Elsewhere#{columns => DesCols#{~"k" => Moved}})
+    ).
+
+diff_drops_a_custom_named_fk_by_its_name_test() ->
+    State = replay(
+        users_and(~"k", [#kura_column{name = u_id, type = integer}]) ++
+            [
+                {execute,
+                    ~"ALTER TABLE k ADD CONSTRAINT fk_u FOREIGN KEY (u_id) REFERENCES users(id)"}
+            ]
+    ),
+    {Up, Down} = kura_schema_diff:diff(State, fk_desired(State, ~"k", u_id, cascade)),
+    ?assertMatch(
+        [
+            {execute, ~"ALTER TABLE \"k\" DROP CONSTRAINT \"fk_u\""},
+            {execute, <<"ALTER TABLE \"k\" ADD CONSTRAINT \"fk_u\"", _/binary>>}
+        ],
+        Up
+    ),
+    ?assertMatch(
+        [{execute, _}, {execute, <<"ALTER TABLE \"k\" ADD CONSTRAINT \"fk_u\"", _/binary>>}], Down
+    ),
+    Dropped = replay(
+        users_and(~"k", [#kura_column{name = u_id, type = integer}]) ++
+            [
+                {execute,
+                    ~"ALTER TABLE k ADD CONSTRAINT fk_u FOREIGN KEY (u_id) REFERENCES users(id)"},
+                {execute, ~"ALTER TABLE k DROP CONSTRAINT fk_u"}
+            ]
+    ),
+    ?assertEqual(undefined, (col(Dropped, ~"k", u_id))#kura_column.references).
+
+replay_unnamed_fk_takes_the_postgres_name_test() ->
+    State = replay(
+        users_and(~"k", [#kura_column{name = u_id, type = integer}]) ++
+            [
+                {execute, ~"ALTER TABLE k ADD FOREIGN KEY (u_id) REFERENCES users(id)"},
+                {execute, ~"ALTER TABLE k DROP CONSTRAINT k_u_id_fkey"}
+            ]
+    ),
+    ?assertEqual(undefined, (col(State, ~"k", u_id))#kura_column.references).
+
+replay_renamed_fk_column_keeps_its_constraint_name_test() ->
+    State = replay(
+        users_and(~"k", [
+            #kura_column{name = u_id, type = integer, references = {~"users", id}}
+        ]) ++
+            [
+                {alter_table, ~"k", [{rename_column, u_id, owner_id}]}
+            ]
+    ),
+    {Up, _} = kura_schema_diff:diff(State, fk_desired(State, ~"k", owner_id, cascade)),
+    ?assertMatch([{execute, ~"ALTER TABLE \"k\" DROP CONSTRAINT \"k_u_id_fkey\""} | _], Up),
+    Dropped = replay(
+        users_and(~"k", [
+            #kura_column{name = u_id, type = integer, references = {~"users", id}}
+        ]) ++
+            [
+                {alter_table, ~"k", [{rename_column, u_id, owner_id}]},
+                {execute, ~"ALTER TABLE k DROP CONSTRAINT k_u_id_fkey"}
+            ]
+    ),
+    ?assertEqual(undefined, (col(Dropped, ~"k", owner_id))#kura_column.references).
+
+replay_statement_split_across_lines_test() ->
+    State = replay([
+        {create_table, ~"orders", [#kura_column{name = note, type = string}]},
+        {execute, ~"ALTER TABLE orders\n  ALTER COLUMN note\n  SET NOT NULL;\n"}
+    ]),
+    ?assertEqual(false, (col(State, ~"orders", note))#kura_column.nullable).
+
+replay_bare_identifiers_fold_to_lower_case_test() ->
+    State = replay([
+        {create_table, ~"orders", [#kura_column{name = user_id, type = integer}]},
+        {execute, ~"ALTER TABLE ORDERS ALTER USER_ID SET NOT NULL"}
+    ]),
+    ?assertEqual(false, (col(State, ~"orders", user_id))#kura_column.nullable).
+
+replay_long_whitespace_still_matches_test() ->
+    Padding = binary:copy(~" ", 5000),
+    State = replay([
+        {create_table, ~"orders", [#kura_column{name = note, type = string}]},
+        {execute, <<"ALTER TABLE orders ALTER COLUMN note SET NOT NULL", Padding/binary, ";">>}
+    ]),
+    ?assertEqual(false, (col(State, ~"orders", note))#kura_column.nullable).
+
+replay_default_round_trips_an_escaped_quote_test() ->
+    Db = #{~"t" => [#kura_column{name = c, type = string}]},
+    Desired = #{~"t" => [#kura_column{name = c, type = string, default = ~"it's"}]},
+    {[], [], [{execute, SetDefault}], _} = diff_parts(Db, Desired),
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = c, type = string}]}, {execute, SetDefault}
+    ]),
+    ?assertEqual(~"it's", (col(State, ~"t", c))#kura_column.default).
+
+replay_default_expression_is_not_replayed_test() ->
+    [
+        begin
+            SQL = <<"ALTER TABLE t ALTER COLUMN c SET DEFAULT ", Value/binary>>,
+            State = replay([
+                {create_table, ~"t", [#kura_column{name = c, type = string}]},
+                {execute, SQL}
+            ]),
+            ?assertEqual(undefined, (col(State, ~"t", c))#kura_column.default),
+            ?assertEqual([SQL], kura_schema_diff:unreplayed_executes(State))
+        end
+     || Value <- [~"'x'::text", ~"'", ~"now()", ~"nextval('s')", ~"1e5"]
+    ].
+
+replay_default_literals_ignore_case_test() ->
+    [
+        ?assertEqual(
+            Expected,
+            (col(
+                replay([
+                    {create_table, ~"t", [#kura_column{name = c, type = boolean}]},
+                    {execute, <<"ALTER TABLE t ALTER COLUMN c SET DEFAULT ", Value/binary>>}
+                ]),
+                ~"t",
+                c
+            ))#kura_column.default
+        )
+     || {Value, Expected} <- [{~"TRUE", true}, {~"False", false}, {~"-3", -3}, {~"1.5", 1.5}]
+    ].
+
+replay_fk_action_after_an_unreadable_one_is_recorded_test() ->
+    State = replay(
+        users_and(~"k", [#kura_column{name = u_id, type = integer}]) ++
+            [
+                {execute,
+                    ~"ALTER TABLE k ADD FOREIGN KEY (u_id) REFERENCES users(id) ON DELETE SET DEFAULT ON UPDATE CASCADE"}
+            ]
+    ),
+    ?assertEqual(cascade, (col(State, ~"k", u_id))#kura_column.on_update).
+
+replay_several_statements_are_not_replayed_test() ->
+    SQL = ~"ALTER TABLE k ADD FOREIGN KEY (u_id) REFERENCES users(id); DROP TABLE k",
+    State = replay(
+        users_and(~"k", [#kura_column{name = u_id, type = integer}]) ++ [{execute, SQL}]
+    ),
+    ?assertEqual(undefined, (col(State, ~"k", u_id))#kura_column.references),
+    ?assertEqual([SQL], kura_schema_diff:unreplayed_executes(State)).
+
+replay_fk_on_delete_after_an_unknown_clause_is_recorded_test() ->
+    State = replay(
+        users_and(~"k", [#kura_column{name = u_id, type = integer}]) ++
+            [
+                {execute,
+                    ~"ALTER TABLE k ADD FOREIGN KEY (u_id) REFERENCES users(id) DEFERRABLE ON DELETE CASCADE"}
+            ]
+    ),
+    ?assertEqual(cascade, (col(State, ~"k", u_id))#kura_column.on_delete),
+    ?assertEqual({[], []}, kura_schema_diff:diff(State, fk_desired(State, ~"k", u_id, cascade))).
+
+replay_unknown_column_is_not_an_atom_leak_test() ->
+    State = replay([
+        {create_table, ~"orders", [#kura_column{name = note, type = string}]},
+        {execute, ~"ALTER TABLE orders ALTER COLUMN never_an_atom_zq81 SET NOT NULL"}
+    ]),
+    ?assertError(badarg, binary_to_existing_atom(~"never_an_atom_zq81")),
+    ?assertMatch([_], kura_schema_diff:unreplayed_executes(State)).
+
+unreplayed_executes_name_a_known_table_test() ->
+    State = replay([
+        {execute, ~"CREATE EXTENSION IF NOT EXISTS citext"},
+        {create_table, ~"users", [#kura_column{name = email, type = string}]},
+        {execute, ~"CREATE INDEX CONCURRENTLY users_email_idx ON users (email)"},
+        {execute,
+            ~"CREATE FUNCTION touch() RETURNS trigger AS $$ BEGIN RETURN NEW; END $$ LANGUAGE plpgsql"}
+    ]),
+    ?assertEqual(
+        [~"CREATE INDEX CONCURRENTLY users_email_idx ON users (email)"],
+        kura_schema_diff:unreplayed_executes(State)
+    ).
+
+unreplayed_executes_skip_dml_test() ->
+    State = replay([
+        {create_table, ~"users", [#kura_column{name = email, type = string}]},
+        {execute, ~"UPDATE users SET email = lower(email)"},
+        {execute, ~"INSERT INTO users (email) VALUES ('a@b')"},
+        {execute, ~"DELETE FROM users WHERE email IS NULL"}
+    ]),
+    ?assertEqual([], kura_schema_diff:unreplayed_executes(State)).
+
+replay_rename_rewrites_a_partial_index_where_test() ->
+    Base = [
+        {create_table, ~"t", [
+            #kura_column{name = user_id, type = integer},
+            #kura_column{name = old, type = utc_datetime}
+        ]},
+        {create_index, ~"t", [user_id], #{where => ~"old IS NULL"}},
+        {alter_table, ~"t", [{rename_column, old, new}]}
+    ],
+    ?assertMatch([{[user_id], #{where := ~"new IS NULL"}}], maps:get(~"t", idxs(replay(Base)))),
+    Dropped = replay(Base ++ [{alter_table, ~"t", [{drop_column, new}]}]),
+    ?assertEqual([], maps:get(~"t", idxs(Dropped))).
+
+replay_rename_to_a_column_with_replacement_characters_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = old, type = utc_datetime}]},
+        {create_index, ~"t", [old], #{where => ~"old IS NULL"}},
+        {alter_table, ~"t", [{rename_column, old, 'a&b\\1'}]}
+    ]),
+    ?assertMatch([{_, #{where := ~"a&b\\1 IS NULL"}}], maps:get(~"t", idxs(State))).
+
+diff_after_a_rename_matches_the_schema_by_structure_test() ->
+    %% kura_schema_verify matches indexes by columns, uniqueness and WHERE,
+    %% so the index keeping its pre-rename name is not drift either.
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = old, type = string}]},
+        {create_index, ~"t", [old], #{}},
+        {alter_table, ~"t", [{rename_column, old, new}]}
+    ]),
+    Desired = #{columns => cols(State), indexes => #{~"t" => [{[new], #{}}]}},
+    ?assertEqual({[], []}, kura_schema_diff:diff(State, Desired)).
+
+diff_rollback_recreates_a_named_index_under_its_name_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = a, type = string}]},
+        {create_index, ~"custom", ~"t", [a], [unique, {where, ~"a IS NOT NULL"}]}
+    ]),
+    Desired = #{columns => cols(State), indexes => #{~"t" => []}},
+    ?assertEqual(
+        {[{drop_index, ~"custom"}], [
+            {create_index, ~"custom", ~"t", [a], [unique, {where, ~"a IS NOT NULL"}]}
+        ]},
+        kura_schema_diff:diff(State, Desired)
+    ).
+
+diff_drops_one_of_two_equivalent_indexes_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = a, type = string}]},
+        {create_index, ~"t", [a], #{}},
+        {create_index, ~"custom", ~"t", [a], []}
+    ]),
+    Desired = #{columns => cols(State), indexes => #{~"t" => [{[a], #{}}]}},
+    {Up, Down} = kura_schema_diff:diff(State, Desired),
+    ?assertEqual(1, length(Up)),
+    ?assertEqual(1, length(Down)).
+
+index_where_match_treats_the_column_name_literally_test() ->
+    State = replay([
+        {create_table, ~"t", [
+            #kura_column{name = a, type = string},
+            #kura_column{name = 'x.y', type = string}
+        ]},
+        {create_index, ~"t", [a], #{where => ~"xzy IS NULL"}},
+        {alter_table, ~"t", [{drop_column, 'x.y'}]}
+    ]),
+    ?assertMatch([{[a], _}], maps:get(~"t", idxs(State))).
+
+diff_does_not_drop_not_null_from_a_demoted_primary_key_test() ->
+    Db = #{~"t" => [#kura_column{name = id, type = id, primary_key = true}]},
+    Desired = #{~"t" => [#kura_column{name = id, type = id}]},
+    ?assertEqual({[], []}, kura_schema_diff:diff(Db, Desired)).
+
+diff_parts(Db, Desired) ->
+    {Up, Down} = kura_schema_diff:diff(Db, Desired),
+    {
+        [Op || {alter_table, _, _} = Op <- Up],
+        [Op || {alter_table, _, _} = Op <- Down],
+        [Op || {execute, _} = Op <- Up],
+        [Op || {execute, _} = Op <- Down]
+    }.
+
+replay_default_with_a_semicolon_round_trips_test() ->
+    Db = #{~"t" => [#kura_column{name = c, type = string}]},
+    Desired = #{~"t" => [#kura_column{name = c, type = string, default = ~"a;b"}]},
+    {[], [], [{execute, SetDefault}], _} = diff_parts(Db, Desired),
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = c, type = string}]}, {execute, SetDefault}
+    ]),
+    ?assertEqual(~"a;b", (col(State, ~"t", c))#kura_column.default),
+    ?assertEqual([], kura_schema_diff:unreplayed_executes(State)).
+
+replay_latin1_seed_data_does_not_crash_test() ->
+    State = replay([
+        {create_table, ~"cities", [#kura_column{name = name, type = string}]},
+        {execute, <<"INSERT INTO cities (name) VALUES ('Malm", 246, "')">>},
+        {execute, <<"ALTER TABLE cities ALTER COLUMN name SET DEFAULT 'Malm", 246, "'">>}
+    ]),
+    ?assertEqual(<<"Malm", 246>>, (col(State, ~"cities", name))#kura_column.default).
+
+replay_latin1_ddl_is_reported_test() ->
+    SQL = <<"ALTER TABLE cities ADD CHECK (name <> 'Malm", 246, "')">>,
+    State = replay([
+        {create_table, ~"cities", [#kura_column{name = name, type = string}]}, {execute, SQL}
+    ]),
+    ?assertEqual([SQL], kura_schema_diff:unreplayed_executes(State)).
+
+replay_ddl_anywhere_in_an_execute_is_reported_test() ->
+    [
+        begin
+            State = replay([
+                {create_table, ~"t", [#kura_column{name = c, type = string}]}, {execute, SQL}
+            ]),
+            ?assertEqual([SQL], kura_schema_diff:unreplayed_executes(State))
+        end
+     || SQL <- [
+            ~"UPDATE t SET c = 'x'; ALTER TABLE t ALTER COLUMN c SET NOT NULL",
+            ~"DO $$ BEGIN ALTER TABLE t ALTER COLUMN c SET NOT NULL; END $$",
+            ~"-- note\nALTER TABLE t ADD CHECK (c <> '')"
+        ]
+    ].
+
+replay_ddl_words_inside_literals_are_not_ddl_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = c, type = string}]},
+        {execute, ~"UPDATE t SET c = 'drop table t'"}
+    ]),
+    ?assertEqual([], kura_schema_diff:unreplayed_executes(State)).
+
+replay_statement_that_changes_nothing_is_reported_test() ->
+    [
+        begin
+            State = replay([
+                {create_table, ~"t", [#kura_column{name = c, type = string}]}, {execute, SQL}
+            ]),
+            ?assertEqual([SQL], kura_schema_diff:unreplayed_executes(State))
+        end
+     || SQL <- [
+            ~"ALTER TABLE t DROP CONSTRAINT t_c_check",
+            ~"ALTER TABLE t ALTER COLUMN name SET NOT NULL",
+            ~"ALTER TABLE t ADD FOREIGN KEY (name) REFERENCES users(id)"
+        ]
+    ].
+
+replay_default_null_drops_the_default_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = c, type = string, default = ~"x"}]},
+        {execute, ~"ALTER TABLE t ALTER COLUMN c SET DEFAULT NULL"}
+    ]),
+    ?assertEqual(undefined, (col(State, ~"t", c))#kura_column.default),
+    ?assertEqual([], kura_schema_diff:unreplayed_executes(State)).
+
+replay_default_exponent_is_not_replayed_test() ->
+    [
+        begin
+            SQL = <<"ALTER TABLE t ALTER COLUMN c SET DEFAULT ", Value/binary>>,
+            State = replay([
+                {create_table, ~"t", [#kura_column{name = c, type = float}]}, {execute, SQL}
+            ]),
+            ?assertEqual(undefined, (col(State, ~"t", c))#kura_column.default),
+            ?assertEqual([SQL], kura_schema_diff:unreplayed_executes(State))
+        end
+     || Value <- [~"1e5", ~"1.5e3"]
+    ].
+
+replay_reports_a_table_whose_name_holds_regex_syntax_test() ->
+    SQL = ~"ALTER TABLE \"a\\Eb(\" ADD CHECK (c <> '')",
+    State = replay([
+        {create_table, ~"a\\Eb(", [#kura_column{name = c, type = string}]}, {execute, SQL}
+    ]),
+    ?assertEqual([SQL], kura_schema_diff:unreplayed_executes(State)).
+
+replay_rename_keeps_a_hand_written_fk_unowned_test() ->
+    State = replay(
+        users_and(~"k", [#kura_column{name = u_id, type = integer}]) ++
+            [
+                {execute, ~"ALTER TABLE k ADD FOREIGN KEY (u_id) REFERENCES users(id) DEFERRABLE"},
+                {alter_table, ~"k", [{rename_column, u_id, owner_id}]}
+            ]
+    ),
+    ?assertError(
+        {kura_schema_diff, {fk_not_owned, ~"k", owner_id}},
+        kura_schema_diff:diff(State, fk_desired(State, ~"k", owner_id, cascade))
+    ).
+
+replay_recreated_table_forgets_the_old_fk_meta_test() ->
+    State = replay(
+        users_and(~"k", [#kura_column{name = u_id, type = integer}]) ++
+            [
+                {execute,
+                    ~"ALTER TABLE k ADD CONSTRAINT fk_u FOREIGN KEY (u_id) REFERENCES users(id) DEFERRABLE"},
+                {drop_table, ~"k"},
+                {create_table, ~"k", [
+                    #kura_column{name = u_id, type = integer, references = {~"users", id}}
+                ]}
+            ]
+    ),
+    {Up, _} = kura_schema_diff:diff(State, fk_desired(State, ~"k", u_id, cascade)),
+    ?assertMatch([{execute, ~"ALTER TABLE \"k\" DROP CONSTRAINT \"k_u_id_fkey\""} | _], Up).
+
+replay_readded_column_forgets_the_old_fk_meta_test() ->
+    State = replay(
+        users_and(~"k", [#kura_column{name = u_id, type = integer}]) ++
+            [
+                {execute,
+                    ~"ALTER TABLE k ADD CONSTRAINT fk_u FOREIGN KEY (u_id) REFERENCES users(id) DEFERRABLE"},
+                {alter_table, ~"k", [{drop_column, u_id}]},
+                {alter_table, ~"k", [
+                    {add_column, #kura_column{
+                        name = u_id, type = integer, references = {~"users", id}
+                    }}
+                ]}
+            ]
+    ),
+    {Up, _} = kura_schema_diff:diff(State, fk_desired(State, ~"k", u_id, cascade)),
+    ?assertMatch([{execute, ~"ALTER TABLE \"k\" DROP CONSTRAINT \"k_u_id_fkey\""} | _], Up).
+
+replay_repeated_on_delete_is_hand_written_test() ->
+    State = replay(
+        users_and(~"k", [#kura_column{name = u_id, type = integer}]) ++
+            [
+                {execute,
+                    ~"ALTER TABLE k ADD FOREIGN KEY (u_id) REFERENCES users(id) ON DELETE CASCADE ON DELETE RESTRICT"}
+            ]
+    ),
+    ?assertError(
+        {kura_schema_diff, {fk_not_owned, ~"k", u_id}},
+        kura_schema_diff:diff(State, fk_desired(State, ~"k", u_id, restrict))
+    ).
+
+diff_drops_the_index_whose_options_differ_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = a, type = string}]},
+        {create_index, ~"t_a_unique", ~"t", [a], [unique]},
+        {create_index, ~"t_a_plain", ~"t", [a], []}
+    ]),
+    Desired = #{columns => cols(State), indexes => #{~"t" => [{[a], #{unique => true}}]}},
+    ?assertEqual(
+        {[{drop_index, ~"t_a_plain"}], [{create_index, ~"t_a_plain", ~"t", [a], []}]},
+        kura_schema_diff:diff(State, Desired)
+    ).
+
+diff_recreates_an_unnamed_index_under_its_generated_name_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = a, type = string}]},
+        {create_index, ~"t", [a], #{unique => true}}
+    ]),
+    Desired = #{columns => cols(State), indexes => #{~"t" => []}},
+    ?assertEqual(
+        {[{drop_index, ~"t_a_index"}], [{create_index, ~"t", [a], #{unique => true}}]},
+        kura_schema_diff:diff(State, Desired)
+    ).
+
+diff_recreates_an_index_named_as_generated_without_its_name_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = a, type = string}]},
+        {create_index, ~"t_a_index", ~"t", [a], [unique]}
+    ]),
+    Desired = #{columns => cols(State), indexes => #{~"t" => []}},
+    ?assertEqual(
+        {[{drop_index, ~"t_a_index"}], [{create_index, ~"t", [a], #{unique => true}}]},
+        kura_schema_diff:diff(State, Desired)
+    ).
