@@ -803,6 +803,30 @@ build_db_state_drop_index_test() ->
     ?assertEqual([], maps:get(<<"t">>, idxs(State), [])),
     meck:unload([m_idx_create, m_idx_drop]).
 
+build_db_state_drop_column_drops_covering_indexes_test() ->
+    %% Taure/kura#160: Postgres drops the index with the column, so replaying
+    %% history must too, or the next compile emits a drop_index that 42704s.
+    meck:new(m_dci_create, [non_strict]),
+    meck:new(m_dci_drop, [non_strict]),
+    meck:expect(m_dci_create, up, fun() ->
+        [
+            {create_table, ~"t", [
+                #kura_column{name = id, type = id},
+                #kura_column{name = email, type = string},
+                #kura_column{name = name, type = string}
+            ]},
+            {create_index, ~"t", [email], #{unique => true}},
+            {create_index, ~"t_name_email_index", ~"t", [name, email], []},
+            {create_index, ~"t", [name], #{}}
+        ]
+    end),
+    meck:expect(m_dci_drop, up, fun() ->
+        [{alter_table, ~"t", [{drop_column, email}]}]
+    end),
+    State = kura_schema_diff:build_db_state([m_dci_create, m_dci_drop]),
+    ?assertEqual([{[name], #{}}], maps:get(~"t", idxs(State))),
+    meck:unload([m_dci_create, m_dci_drop]).
+
 build_desired_state_extracts_indexes_test() ->
     meck:new(idx_schema, [non_strict]),
     meck:expect(idx_schema, table, fun() -> <<"users">> end),
@@ -852,6 +876,58 @@ diff_drop_index_test() ->
     {Up, Down} = kura_schema_diff:diff(Db, Desired),
     ?assertMatch([{drop_index, <<"t_id_index">>}], Up),
     ?assertMatch([{create_index, <<"t">>, [id], #{unique := true}}], Down).
+
+diff_drop_column_drops_its_index_first_test() ->
+    %% Taure/kura#160: after the column goes Postgres has already dropped
+    %% the index (42704) and SQLite refuses the column drop, so the index
+    %% has to go first, and come back only once the column is back.
+    Db = #{
+        columns => #{
+            ~"t" => [#kura_column{name = id, type = id}, #kura_column{name = x, type = string}]
+        },
+        indexes => #{~"t" => [{[x], #{}}, {[id], #{unique => true}}]}
+    },
+    Desired = #{
+        columns => #{~"t" => [#kura_column{name = id, type = id}]},
+        indexes => #{~"t" => []}
+    },
+    {Up, Down} = kura_schema_diff:diff(Db, Desired),
+    ?assertEqual(
+        [
+            {drop_index, ~"t_x_index"},
+            {drop_index, ~"t_id_index"},
+            {alter_table, ~"t", [{drop_column, x}]}
+        ],
+        Up
+    ),
+    ?assertMatch(
+        [
+            {alter_table, ~"t", [{add_column, #kura_column{name = x}}]},
+            {create_index, ~"t", [x], _},
+            {create_index, ~"t", [id], _}
+        ],
+        Down
+    ).
+
+diff_add_column_down_drops_its_index_first_test() ->
+    Db = #{columns => #{~"t" => [#kura_column{name = id, type = id}]}, indexes => #{}},
+    Desired = #{
+        columns => #{
+            ~"t" => [#kura_column{name = id, type = id}, #kura_column{name = x, type = string}]
+        },
+        indexes => #{~"t" => [{[x], #{}}]}
+    },
+    {Up, Down} = kura_schema_diff:diff(Db, Desired),
+    ?assertMatch(
+        [
+            {alter_table, ~"t", [{add_column, #kura_column{name = x}}]},
+            {create_index, ~"t", [x], _}
+        ],
+        Up
+    ),
+    ?assertEqual(
+        [{drop_index, ~"t_x_index"}, {alter_table, ~"t", [{drop_column, x}]}], Down
+    ).
 
 diff_no_index_changes_test() ->
     Db = #{

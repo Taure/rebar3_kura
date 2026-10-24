@@ -156,25 +156,33 @@ diff(DbState, DesiredState) ->
 
     %% Index diffing: all tables (new + existing)
     AllDesiredTables = maps:keys(DesiredCols),
-    {IdxUp, IdxDown} = lists:foldl(
-        fun(Table, {IUpAcc, IDownAcc}) ->
+    {IdxDropUp, IdxCreateUp, IdxDropDown, IdxCreateDown} = lists:foldl(
+        fun(Table, {DUAcc, CUAcc, DDAcc, CDAcc}) ->
             DbTableIdx = maps:get(Table, DbIdx, []),
             DesiredTableIdx = maps:get(Table, DesiredIdx, []),
             {IU, ID} = diff_indexes(Table, DbTableIdx, DesiredTableIdx),
+            {DU, CU} = lists:partition(fun is_drop_index/1, IU),
+            {DD, CD} = lists:partition(fun is_drop_index/1, ID),
             %% The same down/0 drops this table, which drops its indexes with
-            %% it, so a drop_index that follows raises 42704.
-            Down =
+            %% it on every backend, so a drop_index for one raises 42704.
+            DD2 =
                 case lists:member(Table, NewTables) of
                     true -> [];
-                    false -> ID
+                    false -> DD
                 end,
-            {IUpAcc ++ IU, IDownAcc ++ Down}
+            {DUAcc ++ DU, CUAcc ++ CU, DDAcc ++ DD2, CDAcc ++ CD}
         end,
-        {[], []},
+        {[], [], [], []},
         lists:sort(AllDesiredTables)
     ),
 
-    {CreateUp ++ AlterUp ++ ExecUp ++ IdxUp, CreateDown ++ AlterDown ++ ExecDown ++ IdxDown}.
+    %% Index drops go before the column ops and creates after them. Postgres
+    %% drops an index along with a column it covers, so a later drop_index
+    %% raises 42704; SQLite refuses to drop an indexed column at all.
+    {
+        IdxDropUp ++ CreateUp ++ AlterUp ++ ExecUp ++ IdxCreateUp,
+        IdxDropDown ++ CreateDown ++ AlterDown ++ ExecDown ++ IdxCreateDown
+    }.
 
 %% Convert a kura_field to a kura_column (skipping virtual fields)
 -spec field_to_column(#kura_field{}) -> #kura_column{}.
@@ -413,10 +421,26 @@ apply_ops([{drop_table, Name} | Rest], #{columns := ColState, indexes := IdxStat
         columns => maps:remove(Name, ColState),
         indexes => maps:remove(Name, IdxState)
     });
-apply_ops([{alter_table, Name, AlterOps} | Rest], #{columns := ColState} = State) ->
+apply_ops(
+    [{alter_table, Name, AlterOps} | Rest], #{columns := ColState, indexes := IdxState} = State
+) ->
     Cols = maps:get(Name, ColState, []),
     NewCols = apply_alter_ops(AlterOps, Cols),
-    apply_ops(Rest, State#{columns => ColState#{Name => NewCols}});
+    %% Postgres drops every index covering a dropped column along with it,
+    %% and histories written against it rely on that. SQLite refuses such
+    %% a drop, so no history that applied there can disagree.
+    Dropped = [Col || {drop_column, Col} <- AlterOps],
+    Kept = [
+        Entry
+     || {IdxCols, _} = Entry <- maps:get(Name, IdxState, []),
+        not lists:any(fun(C) -> lists:member(C, Dropped) end, IdxCols)
+    ],
+    NewIdxState =
+        case maps:is_key(Name, IdxState) of
+            true -> IdxState#{Name => Kept};
+            false -> IdxState
+        end,
+    apply_ops(Rest, State#{columns => ColState#{Name => NewCols}, indexes => NewIdxState});
 apply_ops([{create_index, Table, Columns, Opts} | Rest], #{indexes := IdxState} = State) ->
     TableIdx = maps:get(Table, IdxState, []),
     Entry = {Columns, Opts},
@@ -502,6 +526,9 @@ diff_indexes(Table, DbIndexes, DesiredIndexes) ->
     DropUp = [{drop_index, index_name(Table, Cols)} || {Cols, _} <- DroppedIdx],
     DropDown = [{create_index, Table, Cols, Opts} || {Cols, Opts} <- DroppedIdx],
     {CreateUp ++ DropUp, CreateDown ++ DropDown}.
+
+is_drop_index({drop_index, _}) -> true;
+is_drop_index(_Op) -> false.
 
 normalize_indexes(Indexes) ->
     %% Don't sort Cols: column order is part of the index identity.
