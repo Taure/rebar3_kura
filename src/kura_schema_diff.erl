@@ -79,6 +79,7 @@ desired_state_for(Mod, #{columns := ColAcc, indexes := IdxAcc, unsupported := Un
         Columns = [field_to_column(F) || F <- Fields, F#kura_field.virtual =/= true],
         Enriched = enrich_with_associations(Mod, Columns),
         Indexes = extract_indexes(Mod),
+        ok = check_index_columns(Mod, Indexes, Enriched),
         Acc#{columns => ColAcc#{Table => Enriched}, indexes => IdxAcc#{Table => Indexes}}
     catch
         error:{kura_schema_diff, {composite_assoc_unsupported, _, _} = Reason} ->
@@ -94,6 +95,15 @@ them, paired with the reason. Render each with `format_error/1`.
 -spec unsupported_schemas(db_state()) -> [{module(), term()}].
 unsupported_schemas(State) ->
     maps:get(unsupported, State, []).
+
+%% Otherwise dropping a field emits drop_column and the index declared on it
+%% comes back as a create_index on a column that no longer exists.
+check_index_columns(Mod, Indexes, Columns) ->
+    Known = [C#kura_column.name || C <- Columns],
+    case [Col || {Cols, _} <- Indexes, Col <- Cols, not lists:member(Col, Known)] of
+        [] -> ok;
+        [Col | _] -> error({kura_schema_diff, {index_unknown_column, Mod, Col}})
+    end.
 
 -spec extract_indexes(module()) -> [index_entry()].
 extract_indexes(Mod) ->
@@ -156,25 +166,26 @@ diff(DbState, DesiredState) ->
 
     %% Index diffing: all tables (new + existing)
     AllDesiredTables = maps:keys(DesiredCols),
-    {IdxUp, IdxDown} = lists:foldl(
-        fun(Table, {IUpAcc, IDownAcc}) ->
-            DbTableIdx = maps:get(Table, DbIdx, []),
-            DesiredTableIdx = maps:get(Table, DesiredIdx, []),
-            {IU, ID} = diff_indexes(Table, DbTableIdx, DesiredTableIdx),
-            %% The same down/0 drops this table, which drops its indexes with
-            %% it, so a drop_index that follows raises 42704.
-            Down =
-                case lists:member(Table, NewTables) of
-                    true -> [];
-                    false -> ID
-                end,
-            {IUpAcc ++ IU, IDownAcc ++ Down}
-        end,
-        {[], []},
-        lists:sort(AllDesiredTables)
-    ),
+    IdxOps = [
+        {
+            diff_indexes(Table, maps:get(Table, DbIdx, []), maps:get(Table, DesiredIdx, [])),
+            lists:member(Table, NewTables)
+        }
+     || Table <- lists:sort(AllDesiredTables)
+    ],
+    IdxUp = lists:append([IU || {{IU, _}, _} <- IdxOps]),
+    %% down/0 drops a new table, and its indexes with it.
+    IdxDown = lists:append([ID || {{_, ID}, false} <- IdxOps]),
+    {IdxDropUp, IdxCreateUp} = lists:partition(fun is_drop_index/1, IdxUp),
+    {IdxDropDown, IdxCreateDown} = lists:partition(fun is_drop_index/1, IdxDown),
 
-    {CreateUp ++ AlterUp ++ ExecUp ++ IdxUp, CreateDown ++ AlterDown ++ ExecDown ++ IdxDown}.
+    %% Index drops go before the column ops and creates after them. Postgres
+    %% drops an index along with a column it covers, so a later drop_index
+    %% raises 42704; SQLite refuses to drop an indexed column at all.
+    {
+        IdxDropUp ++ CreateUp ++ AlterUp ++ ExecUp ++ IdxCreateUp,
+        IdxDropDown ++ CreateDown ++ AlterDown ++ ExecDown ++ IdxCreateDown
+    }.
 
 %% Convert a kura_field to a kura_column (skipping virtual fields)
 -spec field_to_column(#kura_field{}) -> #kura_column{}.
@@ -368,6 +379,11 @@ format_error({assoc_key_not_a_field, Mod, Name, FK}) ->
         "~s: association '~s' names foreign key '~s', which is not a field on ~s",
         [Mod, Name, FK, Mod]
     );
+format_error({index_unknown_column, Mod, Col}) ->
+    io_lib:format(
+        "~s: indexes/0 names column '~s', which is not a column of ~s",
+        [Mod, Col, Mod]
+    );
 format_error({composite_assoc_unsupported, Mod, Name}) ->
     io_lib:format(
         "~s: association '~s' has a composite foreign key; the generator cannot "
@@ -413,10 +429,24 @@ apply_ops([{drop_table, Name} | Rest], #{columns := ColState, indexes := IdxStat
         columns => maps:remove(Name, ColState),
         indexes => maps:remove(Name, IdxState)
     });
-apply_ops([{alter_table, Name, AlterOps} | Rest], #{columns := ColState} = State) ->
+apply_ops(
+    [{alter_table, Name, AlterOps} | Rest], #{columns := ColState, indexes := IdxState} = State
+) ->
     Cols = maps:get(Name, ColState, []),
     NewCols = apply_alter_ops(AlterOps, Cols),
-    apply_ops(Rest, State#{columns => ColState#{Name => NewCols}});
+    %% Postgres drops every index covering a dropped column with it.
+    Dropped = [Col || {drop_column, Col} <- AlterOps],
+    Kept = [
+        Entry
+     || {IdxCols, _} = Entry <- maps:get(Name, IdxState, []),
+        not lists:any(fun(C) -> lists:member(C, Dropped) end, IdxCols)
+    ],
+    NewIdxState =
+        case maps:is_key(Name, IdxState) of
+            true -> IdxState#{Name => Kept};
+            false -> IdxState
+        end,
+    apply_ops(Rest, State#{columns => ColState#{Name => NewCols}, indexes => NewIdxState});
 apply_ops([{create_index, Table, Columns, Opts} | Rest], #{indexes := IdxState} = State) ->
     TableIdx = maps:get(Table, IdxState, []),
     Entry = {Columns, Opts},
@@ -502,6 +532,9 @@ diff_indexes(Table, DbIndexes, DesiredIndexes) ->
     DropUp = [{drop_index, index_name(Table, Cols)} || {Cols, _} <- DroppedIdx],
     DropDown = [{create_index, Table, Cols, Opts} || {Cols, Opts} <- DroppedIdx],
     {CreateUp ++ DropUp, CreateDown ++ DropDown}.
+
+is_drop_index({drop_index, _}) -> true;
+is_drop_index(_Op) -> false.
 
 normalize_indexes(Indexes) ->
     %% Don't sort Cols: column order is part of the index identity.
