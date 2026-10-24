@@ -152,7 +152,7 @@ extract_indexes(Mod) ->
     end.
 
 %% Diff DB state against desired state, returning {UpOps, DownOps}
--spec diff(db_state(), db_state()) -> {[operation()], [operation()]}.
+-spec diff(db_state() | col_state(), db_state() | col_state()) -> {[operation()], [operation()]}.
 diff(DbState, DesiredState) ->
     DbCols = maps:get(columns, ensure_structured(DbState), #{}),
     DesiredCols = maps:get(columns, ensure_structured(DesiredState), #{}),
