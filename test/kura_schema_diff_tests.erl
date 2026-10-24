@@ -1705,7 +1705,7 @@ replay_fk_tail_kura_cannot_express_is_left_alone_test() ->
         {kura_schema_diff, {fk_not_owned, ~"k", u_id}},
         kura_schema_diff:diff(State, fk_desired(State, ~"k", u_id, restrict))
     ),
-    Elsewhere = (fk_desired(State, ~"k", u_id, cascade)),
+    Elsewhere = fk_desired(State, ~"k", u_id, cascade),
     #{columns := #{~"k" := KCols} = DesCols} = Elsewhere,
     Moved = [
         case C#kura_column.name of
@@ -1980,3 +1980,93 @@ diff_parts(Db, Desired) ->
         [Op || {execute, _} = Op <- Up],
         [Op || {execute, _} = Op <- Down]
     }.
+
+replay_default_with_a_semicolon_round_trips_test() ->
+    Db = #{~"t" => [#kura_column{name = c, type = string}]},
+    Desired = #{~"t" => [#kura_column{name = c, type = string, default = ~"a;b"}]},
+    {[], [], [{execute, SetDefault}], _} = diff_parts(Db, Desired),
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = c, type = string}]}, {execute, SetDefault}
+    ]),
+    ?assertEqual(~"a;b", (col(State, ~"t", c))#kura_column.default),
+    ?assertEqual([], kura_schema_diff:unreplayed_executes(State)).
+
+replay_latin1_seed_data_does_not_crash_test() ->
+    State = replay([
+        {create_table, ~"cities", [#kura_column{name = name, type = string}]},
+        {execute, <<"INSERT INTO cities (name) VALUES ('Malm", 246, "')">>},
+        {execute, <<"ALTER TABLE cities ALTER COLUMN name SET DEFAULT 'Malm", 246, "'">>}
+    ]),
+    ?assertEqual(<<"Malm", 246>>, (col(State, ~"cities", name))#kura_column.default).
+
+replay_latin1_ddl_is_reported_test() ->
+    SQL = <<"ALTER TABLE cities ADD CHECK (name <> 'Malm", 246, "')">>,
+    State = replay([
+        {create_table, ~"cities", [#kura_column{name = name, type = string}]}, {execute, SQL}
+    ]),
+    ?assertEqual([SQL], kura_schema_diff:unreplayed_executes(State)).
+
+replay_ddl_anywhere_in_an_execute_is_reported_test() ->
+    [
+        begin
+            State = replay([
+                {create_table, ~"t", [#kura_column{name = c, type = string}]}, {execute, SQL}
+            ]),
+            ?assertEqual([SQL], kura_schema_diff:unreplayed_executes(State))
+        end
+     || SQL <- [
+            ~"UPDATE t SET c = 'x'; ALTER TABLE t ALTER COLUMN c SET NOT NULL",
+            ~"DO $$ BEGIN ALTER TABLE t ALTER COLUMN c SET NOT NULL; END $$",
+            ~"-- note\nALTER TABLE t ADD CHECK (c <> '')"
+        ]
+    ].
+
+replay_ddl_words_inside_literals_are_not_ddl_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = c, type = string}]},
+        {execute, ~"UPDATE t SET c = 'drop table t'"}
+    ]),
+    ?assertEqual([], kura_schema_diff:unreplayed_executes(State)).
+
+replay_statement_that_changes_nothing_is_reported_test() ->
+    [
+        begin
+            State = replay([
+                {create_table, ~"t", [#kura_column{name = c, type = string}]}, {execute, SQL}
+            ]),
+            ?assertEqual([SQL], kura_schema_diff:unreplayed_executes(State))
+        end
+     || SQL <- [
+            ~"ALTER TABLE t DROP CONSTRAINT t_c_check",
+            ~"ALTER TABLE t ALTER COLUMN name SET NOT NULL",
+            ~"ALTER TABLE t ADD FOREIGN KEY (name) REFERENCES users(id)"
+        ]
+    ].
+
+replay_default_null_drops_the_default_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = c, type = string, default = ~"x"}]},
+        {execute, ~"ALTER TABLE t ALTER COLUMN c SET DEFAULT NULL"}
+    ]),
+    ?assertEqual(undefined, (col(State, ~"t", c))#kura_column.default),
+    ?assertEqual([], kura_schema_diff:unreplayed_executes(State)).
+
+replay_default_exponent_is_not_replayed_test() ->
+    [
+        begin
+            SQL = <<"ALTER TABLE t ALTER COLUMN c SET DEFAULT ", Value/binary>>,
+            State = replay([
+                {create_table, ~"t", [#kura_column{name = c, type = float}]}, {execute, SQL}
+            ]),
+            ?assertEqual(undefined, (col(State, ~"t", c))#kura_column.default),
+            ?assertEqual([SQL], kura_schema_diff:unreplayed_executes(State))
+        end
+     || Value <- [~"1e5", ~"1.5e3"]
+    ].
+
+replay_reports_a_table_whose_name_holds_regex_syntax_test() ->
+    SQL = ~"ALTER TABLE \"a\\Eb(\" ADD CHECK (c <> '')",
+    State = replay([
+        {create_table, ~"a\\Eb(", [#kura_column{name = c, type = string}]}, {execute, SQL}
+    ]),
+    ?assertEqual([SQL], kura_schema_diff:unreplayed_executes(State)).

@@ -14,8 +14,7 @@
 
 %% Identifiers quoted the way the generator writes them, or bare the way a
 %% hand-written migration usually does. The two forms capture separately
-%% because PostgreSQL folds only the bare one to lower case. Statements are
-%% trimmed of whitespace and a trailing `;` before they are matched.
+%% because PostgreSQL folds only the bare one to lower case.
 -define(IDENT, "(?:\"((?:[^\"]|\"\")+)\"|([A-Za-z_][A-Za-z0-9_$]*))").
 -define(ALTER_COLUMN_RE, <<
     "(?is)^ALTER\\s+TABLE\\s+", ?IDENT, "\\s+ALTER\\s+(?:COLUMN\\s+)?", ?IDENT, "\\s+(.+)$"
@@ -574,7 +573,7 @@ index_uses({Cols, Opts}, Col) ->
         end.
 
 column_word(Col) ->
-    iolist_to_binary([~"(?i)\\b\\Q", atom_to_binary(Col), ~"\\E\\b"]).
+    <<"(?i)", (word(atom_to_binary(Col)))/binary>>.
 
 %% Postgres names an inline REFERENCES constraint after the column and keeps
 %% that name across a rename, so a renamed column's constraint is recorded
@@ -933,12 +932,9 @@ nullable_changed(_DbCol, _DesCol) ->
 col_map(Cols) ->
     maps:from_list([{C#kura_column.name, C} || C <- Cols]).
 
-%% Replay an `execute` the generator could have written, or a hand-written
-%% variant of one, into the state. Anything else that names a known table is
-%% kept so the caller can say drift on that table may be false.
 replay_execute(SQL, State) ->
     Stmt = statement(SQL),
-    case binary:match(Stmt, ~";") of
+    case binary:match(unquoted(Stmt), ~";") of
         nomatch ->
             case replay_statement(Stmt, State) of
                 {ok, NewState} -> NewState;
@@ -953,6 +949,10 @@ replay_execute(SQL, State) ->
 statement(SQL) ->
     string:trim(string:trim(string:trim(SQL), trailing, ";"), trailing).
 
+%% A `;` or a DDL verb inside a literal or a quoted identifier is not one.
+unquoted(Stmt) ->
+    re:replace(Stmt, ~"'(?:[^']++|'')*+'|\"(?:[^\"]++|\"\")*+\"", ~"", [global, {return, binary}]).
+
 replay_statement(Stmt, State) ->
     case captures(Stmt, ?ALTER_COLUMN_RE, 5) of
         {match, [TableQ, TableB, ColQ, ColB, Action]} ->
@@ -962,7 +962,7 @@ replay_statement(Stmt, State) ->
     end.
 
 replay_alter_column(Table, Col, Action, State) ->
-    case {existing_atom(Col), parse_action(Action)} of
+    case {existing_column(Table, Col, State), parse_action(Action)} of
         {{ok, ColAtom}, {ok, Parsed}} -> {ok, update_col(Table, ColAtom, Parsed, State)};
         _ -> nomatch
     end.
@@ -971,7 +971,7 @@ replay_fk_add(Stmt, State) ->
     case captures(Stmt, ?ADD_FK_RE, 11) of
         {match, [TQ, TB, NQ, NB, CQ, CB, RTQ, RTB, RCQ, RCB, Tail]} ->
             Table = ident(TQ, TB),
-            case {existing_atom(ident(CQ, CB)), existing_atom(ident(RCQ, RCB))} of
+            case {existing_column(Table, ident(CQ, CB), State), existing_atom(ident(RCQ, RCB))} of
                 {{ok, Col}, {ok, RefCol}} ->
                     Refs = {ident(RTQ, RTB), RefCol},
                     Name = constraint_name(Table, Col, ident(NQ, NB)),
@@ -985,7 +985,7 @@ replay_fk_add(Stmt, State) ->
 
 replay_fk_drop(Stmt, State) ->
     case captures(Stmt, ?DROP_FK_RE, 4) of
-        {match, [TQ, TB, NQ, NB]} -> {ok, drop_fk(ident(TQ, TB), ident(NQ, NB), State)};
+        {match, [TQ, TB, NQ, NB]} -> drop_fk(ident(TQ, TB), ident(NQ, NB), State);
         nomatch -> nomatch
     end.
 
@@ -994,7 +994,6 @@ replay_fk_drop(Stmt, State) ->
 captures(Stmt, Pattern, Groups) ->
     re:run(Stmt, Pattern, [{capture, lists:seq(1, Groups), binary}]).
 
-%% PostgreSQL folds a bare identifier to lower case and keeps a quoted one.
 ident(<<>>, Bare) -> string:lowercase(Bare);
 ident(Quoted, _Bare) -> unquote(Quoted).
 
@@ -1010,37 +1009,52 @@ existing_atom(Bin) ->
         error:badarg -> error
     end.
 
+existing_column(Table, Col, #{columns := ColState}) ->
+    case existing_atom(Col) of
+        {ok, Atom} ->
+            case lists:keymember(Atom, #kura_column.name, maps:get(Table, ColState, [])) of
+                true -> {ok, Atom};
+                false -> error
+            end;
+        error ->
+            error
+    end.
+
 constraint_name(Table, Col, <<>>) -> fk_constraint_name(Table, Col);
 constraint_name(_Table, _Col, Name) -> Name.
 
 %% Only DDL can change what a table looks like; a backfill that names the
 %% table does not.
 note_unreplayed(SQL, Stmt, #{columns := Cols} = State) ->
-    Upper = string:uppercase(Stmt),
     case
-        is_ddl(Upper) andalso
-            lists:any(fun(Table) -> names_table(Upper, Table) end, maps:keys(Cols))
+        is_ddl(Stmt) andalso
+            lists:any(fun(Table) -> names_table(Stmt, Table) end, maps:keys(Cols))
     of
         true -> State#{unreplayed => maps:get(unreplayed, State, []) ++ [SQL]};
         false -> State
     end.
 
-is_ddl(Upper) ->
-    case string:lexemes(Upper, " \t\r\n(") of
-        [Verb | _] -> lists:member(Verb, [~"ALTER", ~"CREATE", ~"DROP"]);
-        [] -> false
-    end.
+is_ddl(Stmt) ->
+    re:run(unquoted(Stmt), ~"\\b(?:ALTER|CREATE|DROP)\\b", [caseless, {capture, none}]) =:= match.
 
-names_table(Upper, Table) ->
-    Pattern = [~"\\b\\Q", string:uppercase(Table), ~"\\E\\b"],
-    re:run(Upper, iolist_to_binary(Pattern), [{capture, none}]) =:= match.
+names_table(Stmt, Table) ->
+    re:run(Stmt, word(Table), [caseless, {capture, none}]) =:= match.
+
+%% Escaped byte by byte rather than with \Q...\E, which a name holding
+%% `\E` would end early.
+word(Name) ->
+    <<"(?<![A-Za-z0-9_$])", <<<<(escape(B))/binary>> || <<B>> <= Name>>/binary,
+        "(?![A-Za-z0-9_$])">>.
+
+escape(B) when B >= $a, B =< $z; B >= $A, B =< $Z; B >= $0, B =< $9; B >= 128 -> <<B>>;
+escape(B) -> <<$\\, B>>.
 
 %% An ON DELETE/ON UPDATE kura can express is recorded wherever it sits in the
 %% tail. Anything else (DEFERRABLE, SET DEFAULT, MATCH FULL, ...) also marks the
 %% constraint as hand-written: the diff leaves it alone while the schema agrees
 %% with it, and refuses to regenerate it otherwise.
 parse_fk_actions(Tail) ->
-    fk_actions(string:lexemes(string:uppercase(Tail), " \t\r\n"), #{}, owned).
+    fk_actions(words(Tail), #{}, owned).
 
 fk_actions([], Acc, Ownership) ->
     {Ownership, Acc};
@@ -1081,9 +1095,8 @@ name_if_custom(Table, Col, Name) ->
 put_fk_meta(Key, ColKey, Value, State) when Value =:= undefined; Value =:= false ->
     State#{Key => maps:remove(ColKey, maps:get(Key, State, #{}))};
 put_fk_meta(Key, ColKey, Value, State) ->
-    State#{Key => maps:put(ColKey, Value, maps:get(Key, State, #{}))}.
+    State#{Key => (maps:get(Key, State, #{}))#{ColKey => Value}}.
 
--spec fk_name(map(), binary(), atom()) -> binary().
 fk_name(FkNames, Table, Col) ->
     maps:get({Table, Col}, FkNames, fk_constraint_name(Table, Col)).
 
@@ -1101,9 +1114,9 @@ drop_fk(Table, Constraint, #{columns := ColState} = State) ->
         [Col | _] ->
             State1 = update_col(Table, Col, {fk, undefined, undefined, undefined}, State),
             State2 = put_fk_meta(fk_names, {Table, Col}, undefined, State1),
-            put_fk_meta(fk_unowned, {Table, Col}, false, State2);
+            {ok, put_fk_meta(fk_unowned, {Table, Col}, false, State2)};
         [] ->
-            State
+            nomatch
     end.
 
 parse_action(Action) ->
@@ -1114,7 +1127,7 @@ parse_action(Action) ->
                 error -> nomatch
             end;
         nomatch ->
-            parse_fixed_action(string:lexemes(string:uppercase(Action), " \t\r\n"))
+            parse_fixed_action(words(Action))
     end.
 
 parse_fixed_action([~"SET", ~"NOT", ~"NULL"]) -> {ok, {nullable, false}};
@@ -1125,9 +1138,10 @@ parse_fixed_action(_) -> nomatch.
 %% Only a literal is read. An expression's value is the database's to decide,
 %% so recording its text would compare a string with whatever the schema says.
 parse_default_value(Bin) ->
-    case string:lowercase(Bin) of
-        ~"true" -> {ok, true};
-        ~"false" -> {ok, false};
+    case ascii_upper(Bin) of
+        ~"TRUE" -> {ok, true};
+        ~"FALSE" -> {ok, false};
+        ~"NULL" -> {ok, undefined};
         _ -> parse_literal(Bin)
     end.
 
@@ -1137,24 +1151,32 @@ parse_literal(Bin) ->
         nomatch -> parse_number(Bin)
     end.
 
+%% The forms format_default/1 writes. An exponent is left to the database,
+%% which reads 1e5 as numeric where kura would have to guess integer or float.
 parse_number(Bin) ->
-    try
-        {ok, binary_to_integer(Bin)}
-    catch
-        error:badarg ->
-            try
-                {ok, binary_to_float(Bin)}
-            catch
-                error:badarg -> error
-            end
+    case re:run(Bin, ~"^-?[0-9]+(\\.[0-9]+)?$", [{capture, all_but_first, list}]) of
+        {match, []} -> {ok, binary_to_integer(Bin)};
+        {match, [_]} -> {ok, binary_to_float(Bin)};
+        nomatch -> error
     end.
 
+%% SQL keywords are ASCII. string:uppercase/1 would also raise on a statement
+%% that is not valid UTF-8, such as Latin-1 seed data.
+words(Bin) ->
+    binary:split(ascii_upper(Bin), [~" ", ~"\t", ~"\r", ~"\n"], [global, trim_all]).
+
+ascii_upper(Bin) ->
+    <<<<(upper(B))>> || <<B>> <= Bin>>.
+
+upper(B) when B >= $a, B =< $z -> B - 32;
+upper(B) -> B.
+
 update_col(Table, ColName, Change, #{columns := ColState} = State) ->
-    case maps:find(Table, ColState) of
-        {ok, Cols} ->
+    case ColState of
+        #{Table := Cols} ->
             NewCols = [change_col(C, ColName, Change) || C <- Cols],
             State#{columns => ColState#{Table => NewCols}};
-        error ->
+        #{} ->
             State
     end.
 

@@ -166,7 +166,8 @@ with or without a trailing `;`, and with bare or double-quoted identifiers
 
 - `ALTER TABLE t ALTER [COLUMN] c SET NOT NULL` / `DROP NOT NULL`
 - `ALTER TABLE t ALTER [COLUMN] c SET DEFAULT <literal>` / `DROP DEFAULT`,
-  where the literal is a quoted string, a number, `true` or `false`
+  where the literal is a quoted string, a number without an exponent,
+  `true`, `false` or `NULL`
 - `ALTER TABLE t ADD [CONSTRAINT name] FOREIGN KEY (c) REFERENCES p (k)`,
   with optional `ON DELETE` / `ON UPDATE` of `CASCADE`, `RESTRICT`,
   `SET NULL` or `NO ACTION`
@@ -180,10 +181,13 @@ recorded as hand-written, with any `ON DELETE` it could read: the diff leaves
 it alone while the schema agrees on its references and `ON DELETE`, and
 aborts with `fk_not_owned` rather than regenerate it and lose the clause.
 
-Any other `execute` that names a table in the replayed state (`CREATE
-TRIGGER`, `ADD CHECK`, a multi-column constraint, a default that is an
-expression, several statements in one string, ...) is not replayed. `compile` and `check` print a warning per
-statement, so a drift report that follows one can be read with that in mind.
+Each of these must name a table and column replay knows about, and a
+`DROP CONSTRAINT` a foreign key it recorded. Any other `execute` that names a
+table in the replayed state and holds `ALTER`, `CREATE` or `DROP` outside a
+quoted string (`CREATE TRIGGER`, `ADD CHECK`, a multi-column constraint, a
+default that is an expression, a `DO` block, several statements in one string,
+...) is not replayed. `compile` and `check` print a warning per statement, so
+a drift report that follows one can be read with that in mind.
 
 ### Enum handling
 
