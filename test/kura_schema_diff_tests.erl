@@ -784,7 +784,8 @@ build_db_state_tracks_5tuple_indexes_test() ->
     end),
     State = kura_schema_diff:build_db_state([m_idx5]),
     IdxState = idxs(State),
-    ?assertEqual([{[id], #{unique => true}}], maps:get(<<"t">>, IdxState)),
+    %% The explicit name is kept: drop_index names the index, not its columns.
+    ?assertEqual([{[id], #{unique => true, name => ~"t_id_index"}}], maps:get(<<"t">>, IdxState)),
     meck:unload(m_idx5).
 
 build_db_state_drop_index_test() ->
@@ -1460,3 +1461,158 @@ apply_alter_ops_ext([{modify_column, Name, Type} | Rest], Cols) ->
      || C <- Cols
     ],
     apply_alter_ops_ext(Rest, NewCols).
+
+%%====================================================================
+%% Replay fidelity: history that matches the schema reports no drift
+%%====================================================================
+
+replay(Ops) ->
+    Mod = list_to_atom("m_replay_" ++ integer_to_list(erlang:unique_integer([positive]))),
+    meck:new(Mod, [non_strict]),
+    meck:expect(Mod, up, fun() -> Ops end),
+    State = kura_schema_diff:build_db_state([Mod]),
+    meck:unload(Mod),
+    State.
+
+col(State, Table, Name) ->
+    [C] = [C || C <- maps:get(Table, cols(State)), C#kura_column.name =:= Name],
+    C.
+
+replay_hand_written_unquoted_fk_test() ->
+    State = replay([
+        {create_table, ~"users", [#kura_column{name = id, type = id, primary_key = true}]},
+        {create_table, ~"user_tokens", [
+            #kura_column{name = id, type = id, primary_key = true},
+            #kura_column{name = user_id, type = integer, nullable = false}
+        ]},
+        {execute,
+            ~"ALTER TABLE user_tokens ADD CONSTRAINT user_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"}
+    ]),
+    C = col(State, ~"user_tokens", user_id),
+    ?assertEqual({~"users", id}, C#kura_column.references),
+    ?assertEqual(cascade, C#kura_column.on_delete).
+
+replay_lowercase_alter_column_test() ->
+    State = replay([
+        {create_table, ~"pets", [#kura_column{name = name, type = string}]},
+        {execute, ~"alter table pets alter column name set not null;"}
+    ]),
+    ?assertEqual(false, (col(State, ~"pets", name))#kura_column.nullable).
+
+replay_quoted_identifier_with_embedded_quote_test() ->
+    State = replay([
+        {create_table, ~"we\"ird", [#kura_column{name = c, type = string}]},
+        {execute, ~"ALTER TABLE \"we\"\"ird\" ALTER COLUMN \"c\" SET DEFAULT 'x'"}
+    ]),
+    ?assertEqual(~"x", (col(State, ~"we\"ird", c))#kura_column.default).
+
+diff_primary_key_is_not_null_either_way_test() ->
+    %% A migration usually leaves nullable at its default on the key column;
+    %% the schema often spells out nullable = false. Postgres has it NOT NULL.
+    Db = #{~"t" => [#kura_column{name = id, type = id, primary_key = true}]},
+    Desired = #{
+        ~"t" => [#kura_column{name = id, type = id, primary_key = true, nullable = false}]
+    },
+    ?assertEqual({[], []}, kura_schema_diff:diff(Db, Desired)).
+
+replay_drop_index_by_explicit_name_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = a, type = string}]},
+        {create_index, ~"custom_name", ~"t", [a], []},
+        {drop_index, ~"custom_name"}
+    ]),
+    ?assertEqual([], maps:get(~"t", idxs(State))).
+
+diff_drops_a_named_index_by_its_name_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = a, type = string}]},
+        {create_index, ~"custom_name", ~"t", [a], []}
+    ]),
+    Desired = #{columns => cols(State), indexes => #{~"t" => []}},
+    {Up, _Down} = kura_schema_diff:diff(State, Desired),
+    ?assertEqual([{drop_index, ~"custom_name"}], Up).
+
+replay_rename_then_drop_column_drops_its_index_test() ->
+    %% Taure/rebar3_kura#49
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = old, type = string}]},
+        {create_index, ~"t", [old], #{}},
+        {alter_table, ~"t", [{rename_column, old, new}]},
+        {alter_table, ~"t", [{drop_column, new}]}
+    ]),
+    ?assertEqual([], maps:get(~"t", idxs(State))).
+
+diff_drops_a_renamed_columns_index_by_its_original_name_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = old, type = string}]},
+        {create_index, ~"t", [old], #{}},
+        {alter_table, ~"t", [{rename_column, old, new}]}
+    ]),
+    ?assertMatch([{[new], _}], maps:get(~"t", idxs(State))),
+    Desired = #{columns => cols(State), indexes => #{~"t" => []}},
+    {Up, _Down} = kura_schema_diff:diff(State, Desired),
+    ?assertEqual([{drop_index, ~"t_old_index"}], Up).
+
+replay_drop_column_named_in_a_partial_index_where_test() ->
+    %% Taure/rebar3_kura#49
+    State = replay([
+        {create_table, ~"t", [
+            #kura_column{name = a, type = string},
+            #kura_column{name = deleted_at, type = utc_datetime},
+            #kura_column{name = deleted_by, type = string}
+        ]},
+        {create_index, ~"t", [a], #{where => ~"deleted_at IS NULL"}},
+        {create_index, ~"t_a_by", ~"t", [a], [{where, ~"deleted_by IS NULL"}]},
+        {alter_table, ~"t", [{drop_column, deleted_at}]}
+    ]),
+    ?assertMatch([{[a], #{name := ~"t_a_by"}}], maps:get(~"t", idxs(State))).
+
+pet_store_auth_history_matches_its_schemas_test() ->
+    %% The history and schemas from Taure/kura#178: consistent, yet the
+    %% differ asked to drop three live indexes, re-add an existing foreign
+    %% key and SET NOT NULL on two primary keys.
+    Db = replay([
+        {execute, ~"CREATE EXTENSION IF NOT EXISTS citext"},
+        {create_table, ~"users", [
+            #kura_column{name = id, type = id, primary_key = true},
+            #kura_column{name = email, type = string, nullable = false}
+        ]},
+        {create_index, ~"users_email_index", ~"users", [email], [unique]},
+        {create_table, ~"user_tokens", [
+            #kura_column{name = id, type = id, primary_key = true},
+            #kura_column{name = user_id, type = integer, nullable = false},
+            #kura_column{name = token, type = string, nullable = false},
+            #kura_column{name = context, type = string, nullable = false}
+        ]},
+        {create_index, ~"user_tokens_user_id_index", ~"user_tokens", [user_id], []},
+        {create_index, ~"user_tokens_context_token_index", ~"user_tokens", [context, token], [
+            unique
+        ]},
+        {execute,
+            ~"ALTER TABLE user_tokens ADD CONSTRAINT user_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"}
+    ]),
+    Desired = #{
+        columns => #{
+            ~"users" => [
+                #kura_column{name = id, type = id, primary_key = true, nullable = false},
+                #kura_column{name = email, type = string, nullable = false}
+            ],
+            ~"user_tokens" => [
+                #kura_column{name = id, type = id, primary_key = true, nullable = false},
+                #kura_column{
+                    name = user_id,
+                    type = integer,
+                    nullable = false,
+                    references = {~"users", id},
+                    on_delete = cascade
+                },
+                #kura_column{name = token, type = string, nullable = false},
+                #kura_column{name = context, type = string, nullable = false}
+            ]
+        },
+        indexes => #{
+            ~"users" => [{[email], #{unique => true}}],
+            ~"user_tokens" => [{[user_id], #{}}, {[context, token], #{unique => true}}]
+        }
+    },
+    ?assertEqual({[], []}, kura_schema_diff:diff(Db, Desired)).

@@ -11,12 +11,28 @@
     unsupported_schemas/1
 ]).
 
--define(ALTER_COLUMN_RE, <<"^ALTER TABLE \"([^\"]+)\" ALTER COLUMN \"([^\"]+)\" (.+)$">>).
+%% Identifiers quoted the way the generator writes them, or bare the way a
+%% hand-written migration usually does. (?|...) numbers both branches alike.
+-define(IDENT, "(?|\"((?:[^\"]|\"\")+)\"|([A-Za-z_][A-Za-z0-9_$]*))").
+-define(ALTER_COLUMN_RE,
+    <<"(?i)^\\s*ALTER TABLE ", ?IDENT, " ALTER COLUMN ", ?IDENT, " (.+?)\\s*;?\\s*$">>
+).
 -define(ADD_FK_RE, <<
-    "^ALTER TABLE \"([^\"]+)\" ADD CONSTRAINT \"[^\"]+\" FOREIGN KEY \\(\"([^\"]+)\"\\) "
-    "REFERENCES \"([^\"]+)\" \\(\"([^\"]+)\"\\)(.*)$"
+    "(?i)^\\s*ALTER TABLE ",
+    ?IDENT,
+    " ADD CONSTRAINT ",
+    ?IDENT,
+    " FOREIGN KEY\\s*\\(\\s*",
+    ?IDENT,
+    "\\s*\\) REFERENCES ",
+    ?IDENT,
+    "\\s*\\(\\s*",
+    ?IDENT,
+    "\\s*\\)(.*?)\\s*;?\\s*$"
 >>).
--define(DROP_FK_RE, <<"^ALTER TABLE \"([^\"]+)\" DROP CONSTRAINT \"([^\"]+)\"$">>).
+-define(DROP_FK_RE,
+    <<"(?i)^\\s*ALTER TABLE ", ?IDENT, " DROP CONSTRAINT ", ?IDENT, "\\s*;?\\s*$">>
+).
 
 -type col_state() :: #{binary() => [#kura_column{}]}.
 -type index_entry() :: {[atom()], map()}.
@@ -434,33 +450,25 @@ apply_ops(
 ) ->
     Cols = maps:get(Name, ColState, []),
     NewCols = apply_alter_ops(AlterOps, Cols),
-    %% Postgres drops every index covering a dropped column with it.
-    Dropped = [Col || {drop_column, Col} <- AlterOps],
-    Kept = [
-        Entry
-     || {IdxCols, _} = Entry <- maps:get(Name, IdxState, []),
-        not lists:any(fun(C) -> lists:member(C, Dropped) end, IdxCols)
-    ],
     NewIdxState =
-        case maps:is_key(Name, IdxState) of
-            true -> IdxState#{Name => Kept};
-            false -> IdxState
+        case maps:find(Name, IdxState) of
+            {ok, Entries} -> IdxState#{Name => alter_indexes(AlterOps, Name, Entries)};
+            error -> IdxState
         end,
     apply_ops(Rest, State#{columns => ColState#{Name => NewCols}, indexes => NewIdxState});
 apply_ops([{create_index, Table, Columns, Opts} | Rest], #{indexes := IdxState} = State) ->
     TableIdx = maps:get(Table, IdxState, []),
     Entry = {Columns, Opts},
     apply_ops(Rest, State#{indexes => IdxState#{Table => TableIdx ++ [Entry]}});
-apply_ops([{create_index, _Name, Table, Columns, Opts} | Rest], #{indexes := IdxState} = State) ->
+apply_ops([{create_index, Name, Table, Columns, Opts} | Rest], #{indexes := IdxState} = State) ->
     TableIdx = maps:get(Table, IdxState, []),
-    OptsMap = proplist_to_map(Opts),
+    OptsMap = (proplist_to_map(Opts))#{name => Name},
     Entry = {Columns, OptsMap},
     apply_ops(Rest, State#{indexes => IdxState#{Table => TableIdx ++ [Entry]}});
 apply_ops([{drop_index, IdxName} | Rest], #{indexes := IdxState} = State) ->
-    %% Find and remove the index by its generated name
     NewIdxState = maps:map(
         fun(Table, Entries) ->
-            [E || {Cols, _} = E <- Entries, index_name(Table, Cols) =/= IdxName]
+            [E || E <- Entries, entry_name(Table, E) =/= IdxName]
         end,
         IdxState
     ),
@@ -491,6 +499,42 @@ proplist_to_map(Opts) ->
         #{},
         Opts
     ).
+
+%% Postgres drops an index along with any column it covers or its WHERE
+%% names, and a column rename leaves the index's name as it was.
+alter_indexes([], _Table, Entries) ->
+    Entries;
+alter_indexes([{drop_column, Col} | Rest], Table, Entries) ->
+    alter_indexes(Rest, Table, [E || E <- Entries, not index_uses(E, Col)]);
+alter_indexes([{rename_column, Old, New} | Rest], Table, Entries) ->
+    Renamed = [
+        case lists:member(Old, Cols) of
+            true ->
+                {[rename(C, Old, New) || C <- Cols], Opts#{name => entry_name(Table, E)}};
+            false ->
+                E
+        end
+     || {Cols, Opts} = E <- Entries
+    ],
+    alter_indexes(Rest, Table, Renamed);
+alter_indexes([_Other | Rest], Table, Entries) ->
+    alter_indexes(Rest, Table, Entries).
+
+index_uses({Cols, Opts}, Col) ->
+    lists:member(Col, Cols) orelse
+        case maps:get(where, Opts, undefined) of
+            Where when is_binary(Where) ->
+                Word = <<"\\b", (atom_to_binary(Col, utf8))/binary, "\\b">>,
+                re:run(Where, Word, [{capture, none}]) =:= match;
+            _ ->
+                false
+        end.
+
+rename(Old, Old, New) -> New;
+rename(Col, _Old, _New) -> Col.
+
+entry_name(Table, {Cols, Opts}) ->
+    maps:get(name, Opts, index_name(Table, Cols)).
 
 apply_alter_ops([], Cols) ->
     Cols;
@@ -529,7 +573,10 @@ diff_indexes(Table, DbIndexes, DesiredIndexes) ->
     CreateDown = [{drop_index, index_name(Table, Cols)} || {Cols, _} <- NewIdx],
     %% Dropped indexes: in DB but not in desired
     DroppedIdx = DbSet -- DesiredSet,
-    DropUp = [{drop_index, index_name(Table, Cols)} || {Cols, _} <- DroppedIdx],
+    DropUp = [
+        {drop_index, entry_name(Table, E)}
+     || {Cols, Opts} = E <- DbIndexes, lists:member({Cols, normalize_opts(Opts)}, DroppedIdx)
+    ],
     DropDown = [{create_index, Table, Cols, Opts} || {Cols, Opts} <- DroppedIdx],
     {CreateUp ++ DropUp, CreateDown ++ DropDown}.
 
@@ -584,11 +631,11 @@ diff_columns(Table, DbCols, DesiredCols) ->
             ColBin = atom_to_binary(Name, utf8),
             %% Nullable changes
             {EU2, ED2} =
-                case DbCol#kura_column.nullable =:= DesCol#kura_column.nullable of
+                case is_nullable(DbCol) =:= is_nullable(DesCol) of
                     true ->
                         {EU, ED};
                     false ->
-                        case DesCol#kura_column.nullable of
+                        case is_nullable(DesCol) of
                             true ->
                                 {
                                     EU ++
@@ -754,6 +801,10 @@ format_default(V) -> list_to_binary(io_lib:format("~p", [V])).
 types_equal({enum, _}, {enum, _}) -> true;
 types_equal(A, B) -> A =:= B.
 
+%% A primary key is NOT NULL whether or not the column says so.
+is_nullable(#kura_column{primary_key = true}) -> false;
+is_nullable(#kura_column{nullable = Nullable}) -> Nullable.
+
 col_map(Cols) ->
     maps:from_list([{C#kura_column.name, C} || C <- Cols]).
 
@@ -761,8 +812,9 @@ col_map(Cols) ->
 -spec try_apply_execute(binary(), col_state()) -> col_state().
 try_apply_execute(SQL, State) ->
     case re:run(SQL, ?ALTER_COLUMN_RE, [{capture, all_but_first, binary}]) of
-        {match, [Table, Col, Action]} ->
-            ColAtom = binary_to_atom(Col, utf8),
+        {match, [Table0, Col, Action]} ->
+            Table = unquote(Table0),
+            ColAtom = binary_to_atom(unquote(Col), utf8),
             case parse_action(Action) of
                 {ok, Parsed} -> update_col(Table, ColAtom, Parsed, State);
                 nomatch -> State
@@ -776,10 +828,10 @@ try_apply_execute(SQL, State) ->
 -spec try_apply_fk_execute(binary(), col_state()) -> col_state().
 try_apply_fk_execute(SQL, State) ->
     case re:run(SQL, ?ADD_FK_RE, [{capture, all_but_first, binary}]) of
-        {match, [Table, Col, RefTable, RefCol, Tail]} ->
-            Refs = {RefTable, binary_to_atom(RefCol, utf8)},
-            Parsed = {fk, Refs, parse_on_delete(Tail)},
-            update_col(Table, binary_to_atom(Col, utf8), Parsed, State);
+        {match, [Table, _Constraint, Col, RefTable, RefCol, Tail]} ->
+            Refs = {unquote(RefTable), binary_to_atom(unquote(RefCol), utf8)},
+            Parsed = {fk, Refs, parse_on_delete(string:uppercase(Tail))},
+            update_col(unquote(Table), binary_to_atom(unquote(Col), utf8), Parsed, State);
         nomatch ->
             try_apply_fk_drop(SQL, State)
     end.
@@ -788,7 +840,7 @@ try_apply_fk_execute(SQL, State) ->
 try_apply_fk_drop(SQL, State) ->
     case re:run(SQL, ?DROP_FK_RE, [{capture, all_but_first, binary}]) of
         {match, [Table, Constraint]} ->
-            drop_fk(Table, Constraint, State);
+            drop_fk(unquote(Table), unquote(Constraint), State);
         nomatch ->
             State
     end.
@@ -815,11 +867,22 @@ parse_on_delete(~" ON DELETE SET NULL") -> set_null;
 parse_on_delete(~" ON DELETE NO ACTION") -> no_action;
 parse_on_delete(_) -> undefined.
 
-parse_action(<<"SET NOT NULL">>) -> {ok, {nullable, false}};
-parse_action(<<"DROP NOT NULL">>) -> {ok, {nullable, true}};
-parse_action(<<"DROP DEFAULT">>) -> {ok, {default, undefined}};
-parse_action(<<"SET DEFAULT ", ValBin/binary>>) -> {ok, {default, parse_default_value(ValBin)}};
-parse_action(_) -> nomatch.
+unquote(Ident) ->
+    binary:replace(Ident, ~"\"\"", ~"\"", [global]).
+
+parse_action(Action) ->
+    case string:uppercase(Action) of
+        <<"SET DEFAULT ", _/binary>> ->
+            <<_:12/binary, ValBin/binary>> = Action,
+            {ok, {default, parse_default_value(ValBin)}};
+        Upper ->
+            parse_fixed_action(Upper)
+    end.
+
+parse_fixed_action(<<"SET NOT NULL">>) -> {ok, {nullable, false}};
+parse_fixed_action(<<"DROP NOT NULL">>) -> {ok, {nullable, true}};
+parse_fixed_action(<<"DROP DEFAULT">>) -> {ok, {default, undefined}};
+parse_fixed_action(_) -> nomatch.
 
 parse_default_value(<<"true">>) ->
     true;
