@@ -8,45 +8,53 @@
     diff/2,
     field_to_column/1,
     format_error/1,
+    unreplayed_executes/1,
     unsupported_schemas/1
 ]).
 
 %% Identifiers quoted the way the generator writes them, or bare the way a
-%% hand-written migration usually does. (?|...) numbers both branches alike.
--define(IDENT, "(?|\"((?:[^\"]|\"\")+)\"|([A-Za-z_][A-Za-z0-9_$]*))").
--define(ALTER_COLUMN_RE,
-    <<"(?i)^\\s*ALTER TABLE ", ?IDENT, " ALTER COLUMN ", ?IDENT, " (.+?)\\s*;?\\s*$">>
-).
+%% hand-written migration usually does. The two forms capture separately
+%% because PostgreSQL folds only the bare one to lower case. Statements are
+%% trimmed of whitespace and a trailing `;` before they are matched.
+-define(IDENT, "(?:\"((?:[^\"]|\"\")+)\"|([A-Za-z_][A-Za-z0-9_$]*))").
+-define(ALTER_COLUMN_RE, <<
+    "(?is)^ALTER\\s+TABLE\\s+", ?IDENT, "\\s+ALTER\\s+(?:COLUMN\\s+)?", ?IDENT, "\\s+(.+)$"
+>>).
 -define(ADD_FK_RE, <<
-    "(?i)^\\s*ALTER TABLE ",
+    "(?is)^ALTER\\s+TABLE\\s+",
     ?IDENT,
-    " ADD CONSTRAINT ",
+    "\\s+ADD\\s+(?:CONSTRAINT\\s+",
     ?IDENT,
-    " FOREIGN KEY\\s*\\(\\s*",
+    "\\s+)?FOREIGN\\s+KEY\\s*\\(\\s*",
     ?IDENT,
-    "\\s*\\) REFERENCES ",
+    "\\s*\\)\\s*REFERENCES\\s+",
     ?IDENT,
     "\\s*\\(\\s*",
     ?IDENT,
-    "\\s*\\)(.*?)\\s*;?\\s*$"
+    "\\s*\\)(.*)$"
 >>).
 -define(DROP_FK_RE,
-    <<"(?i)^\\s*ALTER TABLE ", ?IDENT, " DROP CONSTRAINT ", ?IDENT, "\\s*;?\\s*$">>
+    <<"(?is)^ALTER\\s+TABLE\\s+", ?IDENT, "\\s+DROP\\s+CONSTRAINT\\s+", ?IDENT, "$">>
 ).
 
 -type col_state() :: #{binary() => [#kura_column{}]}.
 -type index_entry() :: {[atom()], map()}.
 -type index_state() :: #{binary() => [index_entry()]}.
+-type fk_key() :: {binary(), atom()}.
 -type db_state() :: #{
     columns => col_state(),
     indexes => index_state(),
-    unsupported => [{module(), term()}]
+    unsupported => [{module(), term()}],
+    fk_names => #{fk_key() => binary()},
+    fk_unowned => #{fk_key() => true},
+    unreplayed => [binary()]
 }.
 -type operation() ::
     {create_table, binary(), [#kura_column{}]}
     | {drop_table, binary()}
     | {alter_table, binary(), [alter_op()]}
     | {create_index, binary(), [atom()], map()}
+    | {create_index, binary(), binary(), [atom()], [atom() | {atom(), term()}]}
     | {drop_index, binary()}
     | {execute, binary()}.
 -type alter_op() ::
@@ -71,7 +79,7 @@ build_db_state(MigModules) ->
             Ops = Mod:up(),
             apply_ops(Ops, Acc)
         end,
-        #{columns => #{}, indexes => #{}},
+        #{columns => #{}, indexes => #{}, fk_names => #{}, fk_unowned => #{}, unreplayed => []},
         Sorted
     ).
 
@@ -112,6 +120,15 @@ them, paired with the reason. Render each with `format_error/1`.
 unsupported_schemas(State) ->
     maps:get(unsupported, State, []).
 
+-doc """
+`execute` statements in the migration history that name a known table but
+match no shape replay understands, so drift reported on that table may be
+false. See the README for the shapes it does understand.
+""".
+-spec unreplayed_executes(db_state()) -> [binary()].
+unreplayed_executes(State) ->
+    maps:get(unreplayed, State, []).
+
 %% Otherwise dropping a field emits drop_column and the index declared on it
 %% comes back as a create_index on a column that no longer exists.
 check_index_columns(Mod, Indexes, Columns) ->
@@ -141,6 +158,7 @@ diff(DbState, DesiredState) ->
     DesiredCols = maps:get(columns, ensure_structured(DesiredState), #{}),
     DbIdx = maps:get(indexes, ensure_structured(DbState), #{}),
     DesiredIdx = maps:get(indexes, ensure_structured(DesiredState), #{}),
+    FkMeta = {maps:get(fk_names, DbState, #{}), maps:get(fk_unowned, DbState, #{})},
 
     %% New tables: in desired but not in DB
     NewTables = maps:keys(DesiredCols) -- maps:keys(DbCols),
@@ -159,7 +177,7 @@ diff(DbState, DesiredState) ->
         fun(Table, {AUpAcc, ADownAcc, EUpAcc, EDownAcc}) ->
             DbTableCols = maps:get(Table, DbCols, []),
             DesiredTableCols = maps:get(Table, DesiredCols),
-            case diff_columns(Table, DbTableCols, DesiredTableCols) of
+            case diff_columns(Table, DbTableCols, DesiredTableCols, FkMeta) of
                 {[], [], [], []} ->
                     {AUpAcc, ADownAcc, EUpAcc, EDownAcc};
                 {ColUp, ColDown, EU, ED} ->
@@ -390,6 +408,14 @@ format_error({fk_on_update_not_owned, Table, Col, OnUpdate}) ->
         "write this change as a hand-written migration",
         [Table, Col, string:uppercase(atom_to_list(OnUpdate))]
     );
+format_error({fk_not_owned, Table, Col}) ->
+    io_lib:format(
+        "table \"~s\": the foreign key on '~s' changed, but the existing "
+        "constraint was written by hand with clauses kura cannot express. "
+        "Regenerating it would silently drop them, so write this change as a "
+        "hand-written migration",
+        [Table, Col]
+    );
 format_error({assoc_key_not_a_field, Mod, Name, FK}) ->
     io_lib:format(
         "~s: association '~s' names foreign key '~s', which is not a field on ~s",
@@ -441,21 +467,23 @@ apply_ops([], State) ->
 apply_ops([{create_table, Name, Cols} | Rest], #{columns := ColState} = State) ->
     apply_ops(Rest, State#{columns => ColState#{Name => Cols}});
 apply_ops([{drop_table, Name} | Rest], #{columns := ColState, indexes := IdxState} = State) ->
-    apply_ops(Rest, State#{
+    State1 = State#{
         columns => maps:remove(Name, ColState),
         indexes => maps:remove(Name, IdxState)
-    });
+    },
+    apply_ops(Rest, forget_fk_meta(fun({T, _}) -> T =/= Name end, State1));
 apply_ops(
     [{alter_table, Name, AlterOps} | Rest], #{columns := ColState, indexes := IdxState} = State
 ) ->
     Cols = maps:get(Name, ColState, []),
     NewCols = apply_alter_ops(AlterOps, Cols),
     NewIdxState =
-        case maps:find(Name, IdxState) of
-            {ok, Entries} -> IdxState#{Name => alter_indexes(AlterOps, Name, Entries)};
-            error -> IdxState
+        case IdxState of
+            #{Name := Entries} -> IdxState#{Name => alter_indexes(AlterOps, Name, Entries)};
+            #{} -> IdxState
         end,
-    apply_ops(Rest, State#{columns => ColState#{Name => NewCols}, indexes => NewIdxState});
+    State1 = alter_fk_meta(AlterOps, Name, Cols, State),
+    apply_ops(Rest, State1#{columns => ColState#{Name => NewCols}, indexes => NewIdxState});
 apply_ops([{create_index, Table, Columns, Opts} | Rest], #{indexes := IdxState} = State) ->
     TableIdx = maps:get(Table, IdxState, []),
     Entry = {Columns, Opts},
@@ -473,8 +501,8 @@ apply_ops([{drop_index, IdxName} | Rest], #{indexes := IdxState} = State) ->
         IdxState
     ),
     apply_ops(Rest, State#{indexes => NewIdxState});
-apply_ops([{execute, SQL} | Rest], #{columns := ColState} = State) ->
-    apply_ops(Rest, State#{columns => try_apply_execute(SQL, ColState)});
+apply_ops([{execute, SQL} | Rest], State) ->
+    apply_ops(Rest, replay_execute(SQL, State));
 apply_ops([_Other | Rest], State) ->
     apply_ops(Rest, State).
 
@@ -501,34 +529,79 @@ proplist_to_map(Opts) ->
     ).
 
 %% Postgres drops an index along with any column it covers or its WHERE
-%% names, and a column rename leaves the index's name as it was.
+%% names. A column rename leaves the index's name as it was and rewrites its
+%% predicate, which Postgres stores by column number rather than text.
+%%
+%% The WHERE text is matched as words, case-insensitively: a column name
+%% that also appears inside a string literal in the predicate is a known
+%% false positive.
 alter_indexes([], _Table, Entries) ->
     Entries;
 alter_indexes([{drop_column, Col} | Rest], Table, Entries) ->
     alter_indexes(Rest, Table, [E || E <- Entries, not index_uses(E, Col)]);
 alter_indexes([{rename_column, Old, New} | Rest], Table, Entries) ->
-    Renamed = [
-        case lists:member(Old, Cols) of
-            true ->
-                {[rename(C, Old, New) || C <- Cols], Opts#{name => entry_name(Table, E)}};
-            false ->
-                E
-        end
-     || {Cols, Opts} = E <- Entries
-    ],
-    alter_indexes(Rest, Table, Renamed);
+    alter_indexes(Rest, Table, [rename_entry(Table, Old, New, E) || E <- Entries]);
 alter_indexes([_Other | Rest], Table, Entries) ->
     alter_indexes(Rest, Table, Entries).
+
+rename_entry(Table, Old, New, {Cols, Opts} = E) ->
+    case index_uses(E, Old) of
+        true ->
+            Renamed = Opts#{name => entry_name(Table, E)},
+            {[rename(C, Old, New) || C <- Cols], rename_in_where(Renamed, Old, New)};
+        false ->
+            E
+    end.
+
+rename_in_where(#{where := Where} = Opts, Old, New) when is_binary(Where) ->
+    Opts#{
+        where => re:replace(Where, column_word(Old), atom_to_binary(New), [global, {return, binary}])
+    };
+rename_in_where(Opts, _Old, _New) ->
+    Opts.
 
 index_uses({Cols, Opts}, Col) ->
     lists:member(Col, Cols) orelse
         case maps:get(where, Opts, undefined) of
             Where when is_binary(Where) ->
-                Word = <<"\\b", (atom_to_binary(Col, utf8))/binary, "\\b">>,
-                re:run(Where, Word, [{capture, none}]) =:= match;
+                re:run(Where, column_word(Col), [{capture, none}]) =:= match;
             _ ->
                 false
         end.
+
+column_word(Col) ->
+    iolist_to_binary([~"(?i)\\b\\Q", atom_to_binary(Col), ~"\\E\\b"]).
+
+%% Postgres names an inline REFERENCES constraint after the column and keeps
+%% that name across a rename, so a renamed column's constraint is recorded
+%% under its old name.
+alter_fk_meta([], _Table, _Cols, State) ->
+    State;
+alter_fk_meta([{drop_column, Col} = Op | Rest], Table, Cols, State) ->
+    State1 = forget_fk_meta(fun(Key) -> Key =/= {Table, Col} end, State),
+    alter_fk_meta(Rest, Table, apply_alter_ops([Op], Cols), State1);
+alter_fk_meta([{rename_column, Old, New} = Op | Rest], Table, Cols, State) ->
+    FkNames = maps:get(fk_names, State, #{}),
+    State1 =
+        case lists:keyfind(Old, #kura_column.name, Cols) of
+            #kura_column{references = Refs} when Refs =/= undefined ->
+                Name = fk_name(FkNames, Table, Old),
+                Unowned = maps:is_key({Table, Old}, maps:get(fk_unowned, State, #{})),
+                State0 = forget_fk_meta(fun(Key) -> Key =/= {Table, Old} end, State),
+                S1 = put_fk_meta(fk_names, {Table, New}, name_if_custom(Table, New, Name), State0),
+                put_fk_meta(fk_unowned, {Table, New}, Unowned, S1);
+            _ ->
+                State
+        end,
+    alter_fk_meta(Rest, Table, apply_alter_ops([Op], Cols), State1);
+alter_fk_meta([Op | Rest], Table, Cols, State) ->
+    alter_fk_meta(Rest, Table, apply_alter_ops([Op], Cols), State).
+
+forget_fk_meta(Keep, State) ->
+    State#{
+        fk_names => maps:filter(fun(K, _) -> Keep(K) end, maps:get(fk_names, State, #{})),
+        fk_unowned => maps:filter(fun(K, _) -> Keep(K) end, maps:get(fk_unowned, State, #{}))
+    }.
 
 rename(Old, Old, New) -> New;
 rename(Col, _Old, _New) -> Col.
@@ -572,13 +645,40 @@ diff_indexes(Table, DbIndexes, DesiredIndexes) ->
     CreateUp = [{create_index, Table, Cols, Opts} || {Cols, Opts} <- NewIdx],
     CreateDown = [{drop_index, index_name(Table, Cols)} || {Cols, _} <- NewIdx],
     %% Dropped indexes: in DB but not in desired
-    DroppedIdx = DbSet -- DesiredSet,
-    DropUp = [
-        {drop_index, entry_name(Table, E)}
-     || {Cols, Opts} = E <- DbIndexes, lists:member({Cols, normalize_opts(Opts)}, DroppedIdx)
-    ],
-    DropDown = [{create_index, Table, Cols, Opts} || {Cols, Opts} <- DroppedIdx],
+    Dropped = dropped_entries(DbSet -- DesiredSet, DbIndexes),
+    DropUp = [{drop_index, entry_name(Table, E)} || E <- Dropped],
+    DropDown = [recreate_index(Table, E) || E <- Dropped],
     {CreateUp ++ DropUp, CreateDown ++ DropDown}.
+
+%% Each normalised index dropped takes one DB entry: two indexes that
+%% normalise alike, one of which the schema still wants, lose only one.
+dropped_entries([], _DbIndexes) ->
+    [];
+dropped_entries([{Cols, Opts} | Rest], DbIndexes) ->
+    {Taken, Left} = take_entry(Cols, Opts, DbIndexes, []),
+    [Taken | dropped_entries(Rest, Left)].
+
+take_entry(Cols, Opts, [{Cols, EntryOpts} = E | Rest], Seen) ->
+    case normalize_opts(EntryOpts) of
+        Opts -> {E, lists:reverse(Seen, Rest)};
+        _ -> take_entry(Cols, Opts, Rest, [E | Seen])
+    end;
+take_entry(Cols, Opts, [E | Rest], Seen) ->
+    take_entry(Cols, Opts, Rest, [E | Seen]).
+
+%% Rolling back recreates an index under the name it had, so a later drop
+%% by that name still finds it.
+recreate_index(Table, {Cols, #{name := Name} = Opts}) ->
+    case index_name(Table, Cols) of
+        Name -> {create_index, Table, Cols, normalize_opts(Opts)};
+        _ -> {create_index, Name, Table, Cols, opts_to_proplist(normalize_opts(Opts))}
+    end;
+recreate_index(Table, {Cols, Opts}) ->
+    {create_index, Table, Cols, normalize_opts(Opts)}.
+
+opts_to_proplist(Opts) ->
+    [unique || maps:get(unique, Opts, false) =:= true] ++
+        [{K, V} || K := V <- maps:without([unique], Opts)].
 
 is_drop_index({drop_index, _}) -> true;
 is_drop_index(_Op) -> false.
@@ -595,7 +695,7 @@ normalize_opts(Opts) when is_map(Opts) ->
 normalize_opts(Opts) when is_list(Opts) ->
     proplist_to_map(Opts).
 
-diff_columns(Table, DbCols, DesiredCols) ->
+diff_columns(Table, DbCols, DesiredCols, FkMeta) ->
     DbMap = col_map(DbCols),
     DesiredMap = col_map(DesiredCols),
     DbNames = maps:keys(DbMap),
@@ -631,10 +731,10 @@ diff_columns(Table, DbCols, DesiredCols) ->
             ColBin = atom_to_binary(Name, utf8),
             %% Nullable changes
             {EU2, ED2} =
-                case is_nullable(DbCol) =:= is_nullable(DesCol) of
-                    true ->
-                        {EU, ED};
+                case nullable_changed(DbCol, DesCol) of
                     false ->
+                        {EU, ED};
+                    true ->
                         case is_nullable(DesCol) of
                             true ->
                                 {
@@ -683,7 +783,7 @@ diff_columns(Table, DbCols, DesiredCols) ->
                         {EU2 ++ [{execute, UpDef}], ED2 ++ [{execute, DownDef}]}
                 end,
             %% Foreign key changes
-            {FkUp, FkDown} = fk_ops(Table, Name, DbCol, DesCol),
+            {FkUp, FkDown} = fk_ops(Table, Name, DbCol, DesCol, FkMeta),
             {MU2, MD2, EU3 ++ FkUp, ED3 ++ FkDown}
         end,
         {[], [], [], []},
@@ -697,39 +797,52 @@ diff_columns(Table, DbCols, DesiredCols) ->
 %% is no alter_op for a constraint, so it lowers to explicit SQL, and both
 %% directions drop the old constraint before adding the new one: no dialect
 %% kura targets can change a referential action in place.
-fk_ops(Table, Name, DbCol, DesCol) ->
+%%
+%% The DB side's constraint keeps the name it was created under, which a
+%% hand-written migration or a column rename may have made something other
+%% than the generated one. A constraint whose clauses replay could not read
+%% is left alone while the schema agrees with its references.
+fk_ops(Table, Name, DbCol, DesCol, {FkNames, Unowned}) ->
     DbFk = {DbCol#kura_column.references, DbCol#kura_column.on_delete},
     DesFk = {DesCol#kura_column.references, DesCol#kura_column.on_delete},
-    case DbFk =:= DesFk of
+    IsUnowned = maps:is_key({Table, Name}, Unowned),
+    SameRefs = DbCol#kura_column.references =:= DesCol#kura_column.references,
+    case DbFk =:= DesFk orelse (IsUnowned andalso SameRefs) of
         true ->
             {[], []};
         false ->
-            ok = assert_fk_regenerable(Table, Name, DbCol),
+            ok = assert_fk_regenerable(Table, Name, DbCol, IsUnowned),
+            DbName = fk_name(FkNames, Table, Name),
+            Generated = fk_constraint_name(Table, Name),
             {
-                fk_transition(Table, Name, DbCol, DesCol),
-                fk_transition(Table, Name, DesCol, DbCol)
+                fk_transition(Table, Name, {DbCol, DbName}, {DesCol, Generated}),
+                fk_transition(Table, Name, {DesCol, Generated}, {DbCol, DbName})
             }
     end.
 
 %% ON UPDATE can only come from a hand-written migration - no schema can
 %% declare it - so regenerating the constraint from the schema would drop it.
-assert_fk_regenerable(Table, Name, #kura_column{references = Refs, on_update = OnUpdate}) when
+assert_fk_regenerable(Table, Name, #kura_column{references = Refs}, true) when
+    Refs =/= undefined
+->
+    error({kura_schema_diff, {fk_not_owned, Table, Name}});
+assert_fk_regenerable(Table, Name, #kura_column{references = Refs, on_update = OnUpdate}, _) when
     Refs =/= undefined, OnUpdate =/= undefined
 ->
     error({kura_schema_diff, {fk_on_update_not_owned, Table, Name, OnUpdate}});
-assert_fk_regenerable(_Table, _Name, _DbCol) ->
+assert_fk_regenerable(_Table, _Name, _DbCol, _Unowned) ->
     ok.
 
-fk_transition(Table, Name, From, To) ->
+fk_transition(Table, Name, {From, FromName}, {To, ToName}) ->
     Drop =
         case From#kura_column.references of
             undefined -> [];
-            _ -> [{execute, drop_fk_sql(Table, Name)}]
+            _ -> [{execute, drop_fk_sql(Table, FromName)}]
         end,
     Add =
         case To#kura_column.references of
             undefined -> [];
-            Refs -> [{execute, add_fk_sql(Table, Name, Refs, To#kura_column.on_delete)}]
+            Refs -> [{execute, add_fk_sql(Table, Name, ToName, Refs, To#kura_column.on_delete)}]
         end,
     Drop ++ Add.
 
@@ -739,20 +852,20 @@ fk_transition(Table, Name, From, To) ->
 fk_constraint_name(Table, Col) ->
     iolist_to_binary([Table, ~"_", atom_to_binary(Col, utf8), ~"_fkey"]).
 
-drop_fk_sql(Table, Col) ->
+drop_fk_sql(Table, Constraint) ->
     iolist_to_binary([
         ~"ALTER TABLE ",
         quote(Table),
         ~" DROP CONSTRAINT ",
-        quote(fk_constraint_name(Table, Col))
+        quote(Constraint)
     ]).
 
-add_fk_sql(Table, Col, {RefTable, RefCol}, OnDelete) ->
+add_fk_sql(Table, Col, Constraint, {RefTable, RefCol}, OnDelete) ->
     iolist_to_binary([
         ~"ALTER TABLE ",
         quote(Table),
         ~" ADD CONSTRAINT ",
-        quote(fk_constraint_name(Table, Col)),
+        quote(Constraint),
         ~" FOREIGN KEY (",
         quote(atom_to_binary(Col, utf8)),
         ~") REFERENCES ",
@@ -801,97 +914,213 @@ format_default(V) -> list_to_binary(io_lib:format("~p", [V])).
 types_equal({enum, _}, {enum, _}) -> true;
 types_equal(A, B) -> A =:= B.
 
-%% A primary key is NOT NULL whether or not the column says so.
+%% A primary key is NOT NULL whether or not the column says so, on PostgreSQL
+%% and MySQL; SQLite lets a non-INTEGER primary key hold NULL, but the
+%% ALTER COLUMN this guards cannot run there anyway.
 is_nullable(#kura_column{primary_key = true}) -> false;
 is_nullable(#kura_column{nullable = Nullable}) -> Nullable.
+
+%% The generator does not change primary keys, and Postgres refuses DROP NOT
+%% NULL on a column still in one, so a column gaining or losing its primary
+%% key is not a nullability change here.
+nullable_changed(#kura_column{primary_key = PK} = DbCol, #kura_column{primary_key = PK} = DesCol) ->
+    is_nullable(DbCol) =/= is_nullable(DesCol);
+nullable_changed(_DbCol, _DesCol) ->
+    false.
 
 col_map(Cols) ->
     maps:from_list([{C#kura_column.name, C} || C <- Cols]).
 
-%% Parse known SQL patterns from {execute, SQL} ops to update column state
--spec try_apply_execute(binary(), col_state()) -> col_state().
-try_apply_execute(SQL, State) ->
-    case re:run(SQL, ?ALTER_COLUMN_RE, [{capture, all_but_first, binary}]) of
-        {match, [Table0, Col, Action]} ->
-            Table = unquote(Table0),
-            ColAtom = binary_to_atom(unquote(Col), utf8),
-            case parse_action(Action) of
-                {ok, Parsed} -> update_col(Table, ColAtom, Parsed, State);
-                nomatch -> State
+%% Replay an `execute` the generator could have written, or a hand-written
+%% variant of one, into the state. Anything else that names a known table is
+%% kept so the caller can say drift on that table may be false.
+replay_execute(SQL, State) ->
+    Stmt = statement(SQL),
+    case replay_statement(Stmt, State) of
+        {ok, NewState} -> NewState;
+        nomatch -> note_unreplayed(SQL, Stmt, State)
+    end.
+
+%% Trimmed in Erlang rather than by the patterns, whose lazy tail and
+%% optional terminator backtracked polynomially on long whitespace runs.
+statement(SQL) ->
+    string:trim(string:trim(string:trim(SQL), trailing, ";"), trailing).
+
+replay_statement(Stmt, State) ->
+    case captures(Stmt, ?ALTER_COLUMN_RE, 5) of
+        {match, [TableQ, TableB, ColQ, ColB, Action]} ->
+            replay_alter_column(ident(TableQ, TableB), ident(ColQ, ColB), Action, State);
+        nomatch ->
+            replay_fk_add(Stmt, State)
+    end.
+
+replay_alter_column(Table, Col, Action, State) ->
+    case {existing_atom(Col), parse_action(Action)} of
+        {{ok, ColAtom}, {ok, Parsed}} -> {ok, update_col(Table, ColAtom, Parsed, State)};
+        _ -> nomatch
+    end.
+
+replay_fk_add(Stmt, State) ->
+    case captures(Stmt, ?ADD_FK_RE, 11) of
+        {match, [TQ, TB, NQ, NB, CQ, CB, RTQ, RTB, RCQ, RCB, Tail]} ->
+            Table = ident(TQ, TB),
+            case {existing_atom(ident(CQ, CB)), existing_atom(ident(RCQ, RCB))} of
+                {{ok, Col}, {ok, RefCol}} ->
+                    Refs = {ident(RTQ, RTB), RefCol},
+                    Name = constraint_name(Table, Col, ident(NQ, NB)),
+                    {ok, add_fk(Table, Col, Refs, Name, parse_fk_actions(Tail), State)};
+                _ ->
+                    nomatch
             end;
         nomatch ->
-            try_apply_fk_execute(SQL, State)
+            replay_fk_drop(Stmt, State)
     end.
 
-%% Replaying the constraint SQL back into the column state is what stops a
-%% generated foreign-key migration being regenerated on every subsequent run.
--spec try_apply_fk_execute(binary(), col_state()) -> col_state().
-try_apply_fk_execute(SQL, State) ->
-    case re:run(SQL, ?ADD_FK_RE, [{capture, all_but_first, binary}]) of
-        {match, [Table, _Constraint, Col, RefTable, RefCol, Tail]} ->
-            Refs = {unquote(RefTable), binary_to_atom(unquote(RefCol), utf8)},
-            Parsed = {fk, Refs, parse_on_delete(string:uppercase(Tail))},
-            update_col(unquote(Table), binary_to_atom(unquote(Col), utf8), Parsed, State);
-        nomatch ->
-            try_apply_fk_drop(SQL, State)
+replay_fk_drop(Stmt, State) ->
+    case captures(Stmt, ?DROP_FK_RE, 4) of
+        {match, [TQ, TB, NQ, NB]} -> {ok, drop_fk(ident(TQ, TB), ident(NQ, NB), State)};
+        nomatch -> nomatch
     end.
 
--spec try_apply_fk_drop(binary(), col_state()) -> col_state().
-try_apply_fk_drop(SQL, State) ->
-    case re:run(SQL, ?DROP_FK_RE, [{capture, all_but_first, binary}]) of
-        {match, [Table, Constraint]} ->
-            drop_fk(unquote(Table), unquote(Constraint), State);
-        nomatch ->
-            State
-    end.
+%% Every group is asked for by number: PCRE leaves unset trailing groups out
+%% of an all_but_first capture, and an identifier's unused form is unset.
+captures(Stmt, Pattern, Groups) ->
+    re:run(Stmt, Pattern, [{capture, lists:seq(1, Groups), binary}]).
 
-drop_fk(Table, Constraint, State) ->
-    case maps:find(Table, State) of
-        {ok, Cols} ->
-            NewCols = [
-                case fk_constraint_name(Table, C#kura_column.name) of
-                    Constraint -> C#kura_column{references = undefined, on_delete = undefined};
-                    _ -> C
-                end
-             || C <- Cols
-            ],
-            State#{Table => NewCols};
-        error ->
-            State
-    end.
-
-parse_on_delete(<<>>) -> undefined;
-parse_on_delete(~" ON DELETE CASCADE") -> cascade;
-parse_on_delete(~" ON DELETE RESTRICT") -> restrict;
-parse_on_delete(~" ON DELETE SET NULL") -> set_null;
-parse_on_delete(~" ON DELETE NO ACTION") -> no_action;
-parse_on_delete(_) -> undefined.
+%% PostgreSQL folds a bare identifier to lower case and keeps a quoted one.
+ident(<<>>, Bare) -> string:lowercase(Bare);
+ident(Quoted, _Bare) -> unquote(Quoted).
 
 unquote(Ident) ->
     binary:replace(Ident, ~"\"\"", ~"\"", [global]).
 
-parse_action(Action) ->
-    case string:uppercase(Action) of
-        <<"SET DEFAULT ", _/binary>> ->
-            <<_:12/binary, ValBin/binary>> = Action,
-            {ok, {default, parse_default_value(ValBin)}};
-        Upper ->
-            parse_fixed_action(Upper)
+%% A column that is not already an atom cannot be in the state, so the
+%% statement cannot be about it.
+existing_atom(Bin) ->
+    try
+        {ok, binary_to_existing_atom(Bin)}
+    catch
+        error:badarg -> error
     end.
 
-parse_fixed_action(<<"SET NOT NULL">>) -> {ok, {nullable, false}};
-parse_fixed_action(<<"DROP NOT NULL">>) -> {ok, {nullable, true}};
-parse_fixed_action(<<"DROP DEFAULT">>) -> {ok, {default, undefined}};
+constraint_name(Table, Col, <<>>) -> fk_constraint_name(Table, Col);
+constraint_name(_Table, _Col, Name) -> Name.
+
+note_unreplayed(SQL, Stmt, #{columns := Cols} = State) ->
+    Upper = string:uppercase(Stmt),
+    case lists:any(fun(Table) -> names_table(Upper, Table) end, maps:keys(Cols)) of
+        true -> State#{unreplayed => maps:get(unreplayed, State, []) ++ [SQL]};
+        false -> State
+    end.
+
+names_table(Upper, Table) ->
+    Pattern = [~"\\b\\Q", string:uppercase(Table), ~"\\E\\b"],
+    re:run(Upper, iolist_to_binary(Pattern), [{capture, none}]) =:= match.
+
+%% An ON DELETE/ON UPDATE tail kura can express is recorded. Anything else
+%% (DEFERRABLE, SET DEFAULT, MATCH FULL, ...) leaves the constraint marked as
+%% hand-written: the diff leaves it alone while the schema agrees with its
+%% references, and refuses to regenerate it otherwise.
+parse_fk_actions(Tail) ->
+    fk_actions(string:lexemes(string:uppercase(Tail), " \t\r\n"), #{}).
+
+fk_actions([], Acc) ->
+    {ok, Acc};
+fk_actions([~"ON", ~"DELETE" | _], #{on_delete := _}) ->
+    {unowned, duplicate_on_delete};
+fk_actions([~"ON", ~"UPDATE" | _], #{on_update := _}) ->
+    {unowned, duplicate_on_update};
+fk_actions([~"ON", Event | Rest], Acc) when Event =:= ~"DELETE"; Event =:= ~"UPDATE" ->
+    case referential_action(Rest) of
+        {ok, Action, Rest1} when Event =:= ~"DELETE" ->
+            fk_actions(Rest1, Acc#{on_delete => Action});
+        {ok, Action, Rest1} ->
+            fk_actions(Rest1, Acc#{on_update => Action});
+        error ->
+            {unowned, Rest}
+    end;
+fk_actions(Other, _Acc) ->
+    {unowned, Other}.
+
+referential_action([~"CASCADE" | Rest]) -> {ok, cascade, Rest};
+referential_action([~"RESTRICT" | Rest]) -> {ok, restrict, Rest};
+referential_action([~"SET", ~"NULL" | Rest]) -> {ok, set_null, Rest};
+referential_action([~"NO", ~"ACTION" | Rest]) -> {ok, no_action, Rest};
+referential_action(_) -> error.
+
+add_fk(Table, Col, Refs, Name, Actions, State) ->
+    {OnDelete, OnUpdate, Unowned} =
+        case Actions of
+            {ok, Parsed} ->
+                {
+                    maps:get(on_delete, Parsed, undefined),
+                    maps:get(on_update, Parsed, undefined),
+                    false
+                };
+            {unowned, _} ->
+                {undefined, undefined, true}
+        end,
+    State1 = update_col(Table, Col, {fk, Refs, OnDelete, OnUpdate}, State),
+    State2 = put_fk_meta(fk_names, {Table, Col}, name_if_custom(Table, Col, Name), State1),
+    put_fk_meta(fk_unowned, {Table, Col}, Unowned, State2).
+
+name_if_custom(Table, Col, Name) ->
+    case fk_constraint_name(Table, Col) of
+        Name -> undefined;
+        _ -> Name
+    end.
+
+put_fk_meta(Key, ColKey, Value, State) when Value =:= undefined; Value =:= false ->
+    State#{Key => maps:remove(ColKey, maps:get(Key, State, #{}))};
+put_fk_meta(Key, ColKey, Value, State) ->
+    State#{Key => maps:put(ColKey, Value, maps:get(Key, State, #{}))}.
+
+-spec fk_name(map(), binary(), atom()) -> binary().
+fk_name(FkNames, Table, Col) ->
+    maps:get({Table, Col}, FkNames, fk_constraint_name(Table, Col)).
+
+drop_fk(Table, Constraint, #{columns := ColState} = State) ->
+    FkNames = maps:get(fk_names, State, #{}),
+    Cols = maps:get(Table, ColState, []),
+    case
+        [
+            C#kura_column.name
+         || C <- Cols,
+            C#kura_column.references =/= undefined,
+            fk_name(FkNames, Table, C#kura_column.name) =:= Constraint
+        ]
+    of
+        [Col | _] ->
+            State1 = update_col(Table, Col, {fk, undefined, undefined, undefined}, State),
+            State2 = put_fk_meta(fk_names, {Table, Col}, undefined, State1),
+            put_fk_meta(fk_unowned, {Table, Col}, false, State2);
+        [] ->
+            State
+    end.
+
+parse_action(Action) ->
+    case re:run(Action, ~"(?is)^SET\\s+DEFAULT\\s+(.+)$", [{capture, all_but_first, binary}]) of
+        {match, [Value]} -> {ok, {default, parse_default_value(Value)}};
+        nomatch -> parse_fixed_action(string:lexemes(string:uppercase(Action), " \t\r\n"))
+    end.
+
+parse_fixed_action([~"SET", ~"NOT", ~"NULL"]) -> {ok, {nullable, false}};
+parse_fixed_action([~"DROP", ~"NOT", ~"NULL"]) -> {ok, {nullable, true}};
+parse_fixed_action([~"DROP", ~"DEFAULT"]) -> {ok, {default, undefined}};
 parse_fixed_action(_) -> nomatch.
 
-parse_default_value(<<"true">>) ->
+parse_default_value(~"true") ->
     true;
-parse_default_value(<<"false">>) ->
+parse_default_value(~"false") ->
     false;
-parse_default_value(<<"'", Rest/binary>>) ->
-    binary:part(Rest, 0, byte_size(Rest) - 1);
 parse_default_value(Bin) ->
-    case binary:match(Bin, <<".">>) of
+    case re:run(Bin, ~"(?s)^'((?:[^']|'')*)'$", [{capture, all_but_first, binary}]) of
+        {match, [Inner]} -> binary:replace(Inner, ~"''", ~"'", [global]);
+        nomatch -> parse_number(Bin)
+    end.
+
+parse_number(Bin) ->
+    case binary:match(Bin, ~".") of
         nomatch ->
             try
                 binary_to_integer(Bin)
@@ -906,45 +1135,20 @@ parse_default_value(Bin) ->
             end
     end.
 
-update_col(Table, ColName, {nullable, Val}, State) ->
-    case maps:find(Table, State) of
+update_col(Table, ColName, Change, #{columns := ColState} = State) ->
+    case maps:find(Table, ColState) of
         {ok, Cols} ->
-            NewCols = [
-                case C#kura_column.name of
-                    ColName -> C#kura_column{nullable = Val};
-                    _ -> C
-                end
-             || C <- Cols
-            ],
-            State#{Table => NewCols};
-        error ->
-            State
-    end;
-update_col(Table, ColName, {default, Val}, State) ->
-    case maps:find(Table, State) of
-        {ok, Cols} ->
-            NewCols = [
-                case C#kura_column.name of
-                    ColName -> C#kura_column{default = Val};
-                    _ -> C
-                end
-             || C <- Cols
-            ],
-            State#{Table => NewCols};
-        error ->
-            State
-    end;
-update_col(Table, ColName, {fk, Refs, OnDelete}, State) ->
-    case maps:find(Table, State) of
-        {ok, Cols} ->
-            NewCols = [
-                case C#kura_column.name of
-                    ColName -> C#kura_column{references = Refs, on_delete = OnDelete};
-                    _ -> C
-                end
-             || C <- Cols
-            ],
-            State#{Table => NewCols};
+            NewCols = [change_col(C, ColName, Change) || C <- Cols],
+            State#{columns => ColState#{Table => NewCols}};
         error ->
             State
     end.
+
+change_col(#kura_column{name = Name} = C, Name, {nullable, Val}) ->
+    C#kura_column{nullable = Val};
+change_col(#kura_column{name = Name} = C, Name, {default, Val}) ->
+    C#kura_column{default = Val};
+change_col(#kura_column{name = Name} = C, Name, {fk, Refs, OnDelete, OnUpdate}) ->
+    C#kura_column{references = Refs, on_delete = OnDelete, on_update = OnUpdate};
+change_col(C, _Name, _Change) ->
+    C.

@@ -10,7 +10,9 @@
     find_migration_files/1,
     compile_opts/1,
     compile_all/3,
-    cleanup/1
+    cleanup/1,
+    render_migration/3,
+    report_unreplayed/1
 ]).
 
 -include_lib("kura/include/kura.hrl").
@@ -100,6 +102,7 @@ process_app(AppInfo) ->
 
     try
         DbState = kura_schema_diff:build_db_state(MigMods),
+        report_unreplayed(kura_schema_diff:unreplayed_executes(DbState)),
         DesiredState = kura_schema_diff:build_desired_state(SchemaMods),
         report_unsupported(kura_schema_diff:unsupported_schemas(DesiredState)),
         case kura_schema_diff:diff(DbState, DesiredState) of
@@ -126,6 +129,20 @@ report_unsupported([{_Mod, Reason} | Rest]) ->
         "kura: no migration generated - ~ts", [kura_schema_diff:format_error(Reason)]
     ),
     report_unsupported(Rest).
+
+%% Replay cannot see what these did, so any drift on the tables they name
+%% may be false. Said on every run for the same reason as above.
+-spec report_unreplayed([binary()]) -> ok.
+report_unreplayed(Statements) ->
+    _ = [
+        rebar_api:warn(
+            "kura: migration history has an execute replay cannot read, so drift "
+            "reported on the table it names may be false: ~ts",
+            [SQL]
+        )
+     || SQL <- Statements
+    ],
+    ok.
 
 find_schema_files(SrcDir, MigDir) ->
     AllErl = filelib:wildcard(filename:join([SrcDir, "**", "*.erl"])),
@@ -243,6 +260,7 @@ derive_description(Ops) ->
     end.
 
 is_index_op({create_index, _, _, _}) -> true;
+is_index_op({create_index, _, _, _, _}) -> true;
 is_index_op({drop_index, _}) -> true;
 is_index_op(_) -> false.
 
@@ -273,19 +291,27 @@ render_ops(Ops) ->
 
 render_op({create_table, Table, Cols}) ->
     ColStrs = lists:join(",\n        ", [render_column(C) || C <- Cols]),
-    io_lib:format("{create_table, ~~\"~s\", [~n        ~s~n    ]}", [Table, ColStrs]);
+    io_lib:format("{create_table, ~s, [~n        ~s~n    ]}", [sigil(Table), ColStrs]);
 render_op({drop_table, Table}) ->
-    io_lib:format("{drop_table, ~~\"~s\"}", [Table]);
+    io_lib:format("{drop_table, ~s}", [sigil(Table)]);
 render_op({alter_table, Table, AlterOps}) ->
     OpStrs = lists:join(",\n        ", [render_alter_op(Op) || Op <- AlterOps]),
-    io_lib:format("{alter_table, ~~\"~s\", [~n        ~s~n    ]}", [Table, OpStrs]);
+    io_lib:format("{alter_table, ~s, [~n        ~s~n    ]}", [sigil(Table), OpStrs]);
 render_op({create_index, Table, Columns, Opts}) ->
-    io_lib:format("{create_index, ~~\"~s\", ~w, ~w}", [Table, Columns, Opts]);
+    io_lib:format("{create_index, ~s, ~w, ~w}", [sigil(Table), Columns, Opts]);
+render_op({create_index, Name, Table, Columns, Opts}) ->
+    io_lib:format("{create_index, ~s, ~s, ~w, ~w}", [sigil(Name), sigil(Table), Columns, Opts]);
 render_op({drop_index, Name}) ->
-    io_lib:format("{drop_index, ~~\"~s\"}", [Name]);
+    io_lib:format("{drop_index, ~s}", [sigil(Name)]);
 render_op({execute, SQL}) ->
-    Escaped = string:replace(binary_to_list(SQL), "\"", "\\\"", all),
-    io_lib:format("{execute, ~~\"~s\"}", [Escaped]).
+    io_lib:format("{execute, ~s}", [sigil(SQL)]).
+
+%% Names and SQL come from schemas and from migration history, so they are
+%% escaped into the sigil: `~"..."` interprets backslash escapes, and an
+%% unescaped quote would end the literal and let the rest run as code.
+sigil(Bin) ->
+    Escaped = binary:replace(Bin, [<<$\\>>, <<$">>], <<$\\>>, [global, {insert_replaced, 1}]),
+    [$~, $", Escaped, $"].
 
 render_alter_op({add_column, Col}) ->
     io_lib:format("{add_column, ~s}", [render_column(Col)]);
@@ -327,7 +353,7 @@ render_column(#kura_column{
             undefined ->
                 Parts4;
             {RefTable, RefCol} ->
-                Parts4 ++ [io_lib:format("references = {~~\"~s\", ~p}", [RefTable, RefCol])];
+                Parts4 ++ [io_lib:format("references = {~s, ~p}", [sigil(RefTable), RefCol])];
             _ ->
                 Parts4 ++ [io_lib:format("references = ~p", [Refs])]
         end,
