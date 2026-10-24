@@ -166,24 +166,18 @@ diff(DbState, DesiredState) ->
 
     %% Index diffing: all tables (new + existing)
     AllDesiredTables = maps:keys(DesiredCols),
-    {IdxDropUp, IdxCreateUp, IdxDropDown, IdxCreateDown} = lists:foldl(
-        fun(Table, {DUAcc, CUAcc, DDAcc, CDAcc}) ->
-            DbTableIdx = maps:get(Table, DbIdx, []),
-            DesiredTableIdx = maps:get(Table, DesiredIdx, []),
-            {IU, ID} = diff_indexes(Table, DbTableIdx, DesiredTableIdx),
-            {DU, CU} = lists:partition(fun is_drop_index/1, IU),
-            {DD, CD} = lists:partition(fun is_drop_index/1, ID),
-            %% down/0 drops this table, and its indexes with it.
-            DD2 =
-                case lists:member(Table, NewTables) of
-                    true -> [];
-                    false -> DD
-                end,
-            {DUAcc ++ DU, CUAcc ++ CU, DDAcc ++ DD2, CDAcc ++ CD}
-        end,
-        {[], [], [], []},
-        lists:sort(AllDesiredTables)
-    ),
+    IdxOps = [
+        {
+            diff_indexes(Table, maps:get(Table, DbIdx, []), maps:get(Table, DesiredIdx, [])),
+            lists:member(Table, NewTables)
+        }
+     || Table <- lists:sort(AllDesiredTables)
+    ],
+    IdxUp = lists:append([IU || {{IU, _}, _} <- IdxOps]),
+    %% down/0 drops a new table, and its indexes with it.
+    IdxDown = lists:append([ID || {{_, ID}, false} <- IdxOps]),
+    {IdxDropUp, IdxCreateUp} = lists:partition(fun is_drop_index/1, IdxUp),
+    {IdxDropDown, IdxCreateDown} = lists:partition(fun is_drop_index/1, IdxDown),
 
     %% Index drops go before the column ops and creates after them. Postgres
     %% drops an index along with a column it covers, so a later drop_index
