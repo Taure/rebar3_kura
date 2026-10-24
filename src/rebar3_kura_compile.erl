@@ -174,14 +174,18 @@ compile_and_load(File, Opts) ->
             rebar_api:abort("Failed to compile ~s: ~p", [File, Errors])
     end.
 
+%% kura_schema memoises lookups per module for the life of the VM, so a
+%% module loaded again under the same name would answer with this one's.
+-spec cleanup([module()]) -> ok.
 cleanup(Modules) ->
-    lists:foreach(
-        fun(Mod) ->
-            code:purge(Mod),
-            code:delete(Mod)
-        end,
-        Modules
-    ).
+    _ = [unload(Mod) || Mod <- Modules],
+    ok.
+
+-spec unload(module()) -> ok.
+unload(Mod) ->
+    _ = code:purge(Mod),
+    _ = code:delete(Mod),
+    kura_schema:forget(Mod).
 
 %%====================================================================
 %% Migration generation
