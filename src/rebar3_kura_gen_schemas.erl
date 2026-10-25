@@ -22,7 +22,7 @@ migrations from.
 -define(DEPS, [{default, install_deps}]).
 
 -doc false.
--spec init(rebar_state:t()) -> {ok, rebar_state:t()}.
+-spec init(term()) -> {ok, term()}.
 init(State) ->
     Provider = providers:create([
         {name, ?PROVIDER},
@@ -47,7 +47,7 @@ init(State) ->
     {ok, rebar_state:add_provider(State, Provider)}.
 
 -doc false.
--spec do(rebar_state:t()) -> {ok, rebar_state:t()} | {error, string()}.
+-spec do(term()) -> {ok, term()} | {error, string()}.
 do(State) ->
     rebar3_kura_compile:ensure_kura_on_path(State),
     App = current_app(State),
