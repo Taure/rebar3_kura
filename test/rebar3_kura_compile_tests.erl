@@ -234,6 +234,36 @@ compile_generated_migration(Desc, UpOps, DownOps) ->
             {error, Errors}
     end.
 
+cleanup_forgets_the_schema_so_a_reload_reads_the_new_key_test() ->
+    %% Taure/kura#169: kura check after kura compile in one rebar3 run, or two
+    %% apps declaring the same module name, load a second binary under it.
+    Dir = make_temp_dir(),
+    try
+        Mod = load_key_schema(Dir, "a"),
+        ?assertEqual([a], kura_schema:key(Mod)),
+        rebar3_kura_compile:cleanup([Mod]),
+        ?assertEqual(Mod, load_key_schema(Dir, "b")),
+        ?assertEqual([b], kura_schema:key(Mod))
+    after
+        rebar3_kura_compile:cleanup([reload_key_schema]),
+        cleanup_dir(Dir)
+    end.
+
+load_key_schema(Dir, Key) ->
+    File = filename:join(Dir, "reload_key_schema.erl"),
+    Source = [
+        "-module(reload_key_schema).\n",
+        "-export([table/0, fields/0, key/0]).\n",
+        "table() -> <<\"t\">>.\n",
+        "fields() -> [].\n",
+        "key() -> [",
+        Key,
+        "].\n"
+    ],
+    ok = file:write_file(File, Source),
+    [Mod] = element(1, rebar3_kura_compile:compile_all([File], [], [binary, return_errors])),
+    Mod.
+
 cleanup_mod(Mod) ->
     code:purge(Mod),
     code:delete(Mod).
@@ -242,11 +272,14 @@ is_schema_file(File) ->
     {ok, Bin} = file:read_file(File),
     re:run(Bin, "-behaviou?r\\(kura_schema\\)") =/= nomatch.
 
+%% Tests compile and load code from this directory, so its name must not be
+%% guessable and it must not already exist.
 make_temp_dir() ->
     Dir = filename:join(
-        "/tmp", "rebar3_kura_test_" ++ integer_to_list(erlang:unique_integer([positive]))
+        "/tmp",
+        "rebar3_kura_test_" ++ binary_to_list(binary:encode_hex(crypto:strong_rand_bytes(16)))
     ),
-    ok = filelib:ensure_dir(filename:join(Dir, ".")),
+    ok = file:make_dir(Dir),
     Dir.
 
 cleanup_dir(Dir) ->
