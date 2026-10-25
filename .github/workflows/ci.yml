@@ -15,6 +15,7 @@ jobs:
     uses: Taure/erlang-ci/.github/workflows/ci.yml@v2.0.5
     with:
       enable-elp-eqwalize: true
+      elp-version: '2026-10-14'
       enable-dependency-submission: true
       enable-summary: true
       enable-sbom-scan: true
