@@ -1,7 +1,5 @@
 -module(rebar3_kura_compile).
 
--behaviour(provider).
-
 -export([init/1, do/1, format_error/1]).
 -export([
     ensure_kura_on_path/1,
@@ -181,10 +179,10 @@ compile_all(SchemaFiles, MigFiles, Opts) ->
 
 compile_and_load(File, Opts) ->
     case compile:file(File, Opts) of
-        {ok, Mod, Bin} ->
+        {ok, Mod, Bin} when is_atom(Mod), is_binary(Bin) ->
             {module, Mod} = code:load_binary(Mod, File, Bin),
             Mod;
-        {ok, Mod, Bin, _Warnings} ->
+        {ok, Mod, Bin, _Warnings} when is_atom(Mod), is_binary(Bin) ->
             {module, Mod} = code:load_binary(Mod, File, Bin),
             Mod;
         {error, Errors, _Warnings} ->

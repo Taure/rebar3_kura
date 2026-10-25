@@ -221,11 +221,11 @@ compile_generated_migration(Desc, UpOps, DownOps) ->
     File = filename:join(Dir, ModName ++ ".erl"),
     ok = file:write_file(File, Source),
     case compile:file(File, [binary, return_errors, {i, code:lib_dir(kura, include)}]) of
-        {ok, Mod, Bin} ->
+        {ok, Mod, Bin} when is_atom(Mod), is_binary(Bin) ->
             {module, Mod} = code:load_binary(Mod, File, Bin),
             cleanup_dir(Dir),
             {ok, Mod};
-        {ok, Mod, Bin, _Warnings} ->
+        {ok, Mod, Bin, _Warnings} when is_atom(Mod), is_binary(Bin) ->
             {module, Mod} = code:load_binary(Mod, File, Bin),
             cleanup_dir(Dir),
             {ok, Mod};
