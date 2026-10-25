@@ -17,8 +17,6 @@ without regenerating a migration (or any tool that generates an
 incomplete diff) gets a red build instead of a silent landmine.
 """.
 
--behaviour(provider).
-
 -export([init/1, do/1, format_error/1]).
 
 -define(PROVIDER, check).

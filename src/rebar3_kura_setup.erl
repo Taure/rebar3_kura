@@ -1,7 +1,5 @@
 -module(rebar3_kura_setup).
 
--behaviour(provider).
-
 -export([init/1, do/1, format_error/1]).
 -export([render_repo/2]).
 
