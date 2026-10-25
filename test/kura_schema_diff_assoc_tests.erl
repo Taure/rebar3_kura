@@ -190,15 +190,8 @@ composite_assoc_is_scoped_to_its_own_schema_test() ->
 
 invalid_on_delete_aborts_test() ->
     mock_parent(fk_p12),
-    mock_child(fk_c12, [
-        #kura_assoc{
-            name = user,
-            type = belongs_to,
-            schema = fk_p12,
-            foreign_key = user_id,
-            on_delete = cascde
-        }
-    ]),
+    Assoc = #kura_assoc{name = user, type = belongs_to, schema = fk_p12, foreign_key = user_id},
+    mock_child(fk_c12, [setelement(#kura_assoc.on_delete, Assoc, cascde)]),
     ?assertError(
         {kura_schema_diff, {invalid_on_delete, fk_c12, user, cascde}},
         kura_schema_diff:build_desired_state([fk_c12])
