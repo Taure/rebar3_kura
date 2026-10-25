@@ -399,7 +399,7 @@ format_error({composite_target_key, Mod, Name, Target, Cols}) ->
     );
 format_error({associations_failed, Mod, Class, Reason}) ->
     io_lib:format("~s: associations/0 raised ~s:~p", [Mod, Class, Reason]);
-format_error({fk_on_update_not_owned, Table, Col, OnUpdate}) ->
+format_error({fk_on_update_not_owned, Table, Col, OnUpdate}) when is_atom(OnUpdate) ->
     io_lib:format(
         "table \"~s\": the foreign key on '~s' changed, but the existing "
         "constraint carries ON UPDATE ~s, which no schema can declare. "
