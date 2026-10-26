@@ -2804,3 +2804,15 @@ replay_create_table_check_constraint_is_not_noted_test() ->
         {create_table, ~"t", [#kura_column{name = b, type = integer}], [{check, ~"b > 0"}]}
     ]),
     ?assertEqual([], kura_schema_diff:unreplayed_executes(State)).
+
+desired_state_sees_a_key_0_redefined_in_the_same_vm_test() ->
+    Mod = keyed_schema(membership_k6, [org_id, user_id], membership_fields()),
+    try
+        First = kura_schema_diff:build_desired_state([Mod]),
+        ?assertEqual(#{~"memberships" => [org_id, user_id]}, maps:get(keys, First)),
+        meck:expect(Mod, key, fun() -> [user_id] end),
+        Second = kura_schema_diff:build_desired_state([Mod]),
+        ?assertEqual(#{~"memberships" => [user_id]}, maps:get(keys, Second))
+    after
+        meck:unload(Mod)
+    end.

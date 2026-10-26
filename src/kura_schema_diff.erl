@@ -139,17 +139,9 @@ desired_state_for(
             Acc#{unsupported => Unsup ++ [{Mod, Reason}]}
     end.
 
-%% kura_schema:key/1 is the schema's own key: key/0 when the schema has it,
-%% which is how a composite key is documented, and the primary_key = true
-%% fields otherwise. The flags alone missed a key/0 key entirely.
 -spec schema_key(module(), [#kura_field{}]) -> [atom()].
 schema_key(Mod, Fields) ->
-    Names =
-        try
-            kura_schema:key(Mod)
-        catch
-            error:{no_primary_key, Mod} -> []
-        end,
+    Names = declared_key(Mod),
     [key_column(Mod, Name, Fields) || Name <- Names].
 
 -spec key_column(module(), atom(), [#kura_field{}]) -> atom().
@@ -412,15 +404,19 @@ target_key(Mod, Name, Assoc, Target) ->
 
 declared_target_key(Assoc, Target) ->
     case kura_schema:assoc_target_key(Assoc) of
-        undefined -> target_schema_key(Target);
+        undefined -> declared_key(Target);
         Cols -> Cols
     end.
 
-target_schema_key(Target) ->
+%% kura_schema caches a key for the life of the VM, and a schema reloaded
+%% in a rebar3 shell would otherwise keep the key its old code declared.
+-spec declared_key(module()) -> [atom()].
+declared_key(Mod) ->
+    ok = kura_schema:forget(Mod),
     try
-        kura_schema:key(Target)
+        kura_schema:key(Mod)
     catch
-        error:{no_primary_key, Target} -> []
+        error:{no_primary_key, Mod} -> []
     end.
 
 enrich_fk_column(Mod, Assoc, FK, Refs, OnDelete, Columns) ->
