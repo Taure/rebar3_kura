@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Requires kura `~> 2.22`, for `kura_schema:forget/1`, so an edited `key/0` is read fresh in a running VM
 - New tables that reference each other in a cycle abort with `reference_cycle` instead of generating `create_table` ops no order can run (#41)
 - A change to an existing table's set of primary key columns (a field gaining or losing `primary_key = true`, a new key field, a dropped key field) aborts with `primary_key_changed`, naming the table, the column and the expected key constraint, instead of generating nothing or an `add_column` that cannot run. Replay reads the hand-written `DROP CONSTRAINT` / `ADD PRIMARY KEY` that makes the change, and a table rebuild from `create_table/4` and `drop_table` for SQLite (#53)
 
