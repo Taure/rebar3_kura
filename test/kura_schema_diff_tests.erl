@@ -2752,3 +2752,22 @@ desired_state_refuses_a_key_naming_no_field_test() ->
     after
         meck:unload(Mod)
     end.
+
+diff_reference_cycle_names_only_tables_in_a_cycle_test() ->
+    Ref = fun(T) ->
+        #kura_column{
+            name = binary_to_atom(<<T/binary, "_id">>), type = integer, references = {T, id}
+        }
+    end,
+    Desired = #{
+        ~"a" => [Ref(~"b")],
+        ~"b" => [Ref(~"a")],
+        ~"m" => [Ref(~"a")],
+        ~"c" => [Ref(~"d")],
+        ~"d" => [Ref(~"c"), Ref(~"m")],
+        ~"n" => [Ref(~"n")]
+    },
+    ?assertError(
+        {kura_schema_diff, {reference_cycle, [~"a", ~"b", ~"c", ~"d"]}},
+        kura_schema_diff:diff(#{}, Desired)
+    ).

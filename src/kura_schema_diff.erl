@@ -309,27 +309,35 @@ unkeyed_not_null(C) ->
 create_order([], _Cols) ->
     [];
 create_order(Tables, Cols) ->
-    case [T || T <- Tables, not references_any(T, Tables -- [T], Cols)] of
+    case [T || T <- Tables, refs(T, Tables, Cols) =:= []] of
         [] -> error({kura_schema_diff, {reference_cycle, in_cycle(Tables, Cols)}});
         Ready -> Ready ++ create_order(Tables -- Ready, Cols)
     end.
 
-%% Tables that only hang off a cycle are not part of it.
+%% A table can also sit between cycles, reached from one and reaching
+%% another, without being in either.
 -spec in_cycle([binary()], col_state()) -> [binary()].
 in_cycle(Tables, Cols) ->
-    case [T || T <- Tables, not referenced_by(T, Tables -- [T], Cols)] of
-        [] -> Tables;
-        Leaves -> in_cycle(Tables -- Leaves, Cols)
+    [T || T <- Tables, lists:member(T, reachable(refs(T, Tables, Cols), [], Tables, Cols))].
+
+-spec reachable([binary()], [binary()], [binary()], col_state()) -> [binary()].
+reachable([], Seen, _Tables, _Cols) ->
+    Seen;
+reachable([T | Rest], Seen, Tables, Cols) ->
+    case lists:member(T, Seen) of
+        true -> reachable(Rest, Seen, Tables, Cols);
+        false -> reachable(refs(T, Tables, Cols) ++ Rest, [T | Seen], Tables, Cols)
     end.
 
--spec references_any(binary(), [binary()], col_state()) -> boolean().
-references_any(Table, Others, Cols) ->
-    [Ref || #kura_column{references = {Ref, _}} <- maps:get(Table, Cols), lists:member(Ref, Others)] =/=
-        [].
-
--spec referenced_by(binary(), [binary()], col_state()) -> boolean().
-referenced_by(Table, Others, Cols) ->
-    [Other || Other <- Others, references_any(Other, [Table], Cols)] =/= [].
+%% A table referencing itself is created in one statement, so that is no edge.
+-spec refs(binary(), [binary()], col_state()) -> [binary()].
+refs(Table, Tables, Cols) ->
+    lists:usort([
+        Ref
+     || #kura_column{references = {Ref, _}} <- maps:get(Table, Cols),
+        Ref =/= Table,
+        lists:member(Ref, Tables)
+    ]).
 
 %% Convert a kura_field to a kura_column (skipping virtual fields)
 -spec field_to_column(#kura_field{}) -> #kura_column{}.
