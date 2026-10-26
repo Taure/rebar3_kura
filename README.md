@@ -103,6 +103,11 @@ It does **not** auto-generate:
 - `drop_table` operations (destructive — write manually)
 - Primary key changes (refused, see below)
 
+New tables are created after the new tables they reference, and `down/0`
+drops them in the reverse order. New tables that reference each other in a
+cycle abort with `reference_cycle`: no order of `CREATE TABLE` can declare
+all their foreign keys inline, so they need a hand-written migration.
+
 ### Primary key changes
 
 A field gaining or losing `primary_key = true` on a table that already exists

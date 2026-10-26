@@ -179,8 +179,9 @@ diff(DbState, DesiredState) ->
 
     %% New tables: in desired but not in DB
     NewTables = lists:sort(maps:keys(DesiredCols) -- maps:keys(DbCols)),
-    CreateUp = [{create_table, Table, maps:get(Table, DesiredCols)} || Table <- NewTables],
-    CreateDown = [{drop_table, Table} || Table <- drop_order(NewTables, DesiredCols)],
+    CreateOrder = create_order(NewTables, DesiredCols),
+    CreateUp = [{create_table, Table, maps:get(Table, DesiredCols)} || Table <- CreateOrder],
+    CreateDown = [{drop_table, Table} || Table <- lists:reverse(CreateOrder)],
 
     %% Existing tables: diff columns
     ExistingTables = maps:keys(DesiredCols) -- NewTables,
@@ -236,26 +237,35 @@ diff(DbState, DesiredState) ->
         IdxDropDown ++ ExecDown ++ AlterDown ++ CreateDown ++ IdxCreateDown
     }.
 
-%% A table goes once no other table still to be dropped references it. Tables
-%% that reference each other cannot be dropped one at a time in any order, so
-%% they are left in name order.
--spec drop_order([binary()], col_state()) -> [binary()].
-drop_order([], _Cols) ->
+%% CREATE TABLE writes REFERENCES inline, so a new table is created once
+%% every other new table it references exists. Tables that reference each
+%% other have no such order and are refused: the cycle needs a foreign key
+%% added after both tables exist, which is the author's call.
+-spec create_order([binary()], col_state()) -> [binary()].
+create_order([], _Cols) ->
     [];
-drop_order(Tables, Cols) ->
+create_order(Tables, Cols) ->
+    case [T || T <- Tables, not references_any(T, Tables -- [T], Cols)] of
+        [] -> error({kura_schema_diff, {reference_cycle, in_cycle(Tables, Cols)}});
+        Ready -> Ready ++ create_order(Tables -- Ready, Cols)
+    end.
+
+%% Tables that only hang off a cycle are not part of it.
+-spec in_cycle([binary()], col_state()) -> [binary()].
+in_cycle(Tables, Cols) ->
     case [T || T <- Tables, not referenced_by(T, Tables -- [T], Cols)] of
         [] -> Tables;
-        Free -> Free ++ drop_order(Tables -- Free, Cols)
+        Leaves -> in_cycle(Tables -- Leaves, Cols)
     end.
+
+-spec references_any(binary(), [binary()], col_state()) -> boolean().
+references_any(Table, Others, Cols) ->
+    [Ref || #kura_column{references = {Ref, _}} <- maps:get(Table, Cols), lists:member(Ref, Others)] =/=
+        [].
 
 -spec referenced_by(binary(), [binary()], col_state()) -> boolean().
 referenced_by(Table, Others, Cols) ->
-    [
-        Other
-     || Other <- Others,
-        #kura_column{references = {Ref, _}} <- maps:get(Other, Cols),
-        Ref =:= Table
-    ] =/= [].
+    [Other || Other <- Others, references_any(Other, [Table], Cols)] =/= [].
 
 %% Convert a kura_field to a kura_column (skipping virtual fields)
 -spec field_to_column(#kura_field{}) -> #kura_column{}.
@@ -460,6 +470,14 @@ format_error({primary_key_changed, Table, Col, Joins}) when is_atom(Col), is_boo
         "{execute, ~~\"ALTER TABLE ~s DROP CONSTRAINT ~s_pkey\"} then "
         "{execute, ~~\"ALTER TABLE ~s ADD PRIMARY KEY (...)\"}, which replay reads",
         [Table, key_change(Joins, Col), Table, Table, Table]
+    );
+format_error({reference_cycle, Tables}) when is_list(Tables) ->
+    io_lib:format(
+        "new tables ~s reference each other, so no order of CREATE TABLE "
+        "can declare all their foreign keys inline. Create them in a "
+        "hand-written migration that adds one of the foreign keys after both "
+        "tables exist",
+        [lists:join(", ", [[$", T, $"] || T <- Tables, is_binary(T)])]
     );
 format_error({assoc_key_not_a_field, Mod, Name, FK}) ->
     io_lib:format(

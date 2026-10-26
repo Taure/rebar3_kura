@@ -1069,7 +1069,7 @@ diff_new_table_index_down_is_only_the_drop_table_test() ->
     ),
     %% The down is the two table drops and nothing else.
     ?assertEqual(
-        [{drop_table, <<"quest_progress">>}, {drop_table, <<"quests">>}],
+        [{drop_table, <<"quests">>}, {drop_table, <<"quest_progress">>}],
         Down
     ),
 
@@ -2240,14 +2240,32 @@ diff_down_drops_a_self_referencing_new_table_test() ->
     },
     ?assertMatch({_, [{drop_table, ~"nodes"}]}, kura_schema_diff:diff(#{}, Desired)).
 
-diff_down_keeps_mutually_referencing_new_tables_test() ->
+diff_up_creates_a_referenced_new_table_first_test() ->
+    Posts = [#kura_column{name = user_id, type = integer, references = {~"users", id}}],
+    Desired = #{~"posts" => Posts, ~"users" => new_authors_table()},
+    ?assertEqual(
+        {
+            [{create_table, ~"users", new_authors_table()}, {create_table, ~"posts", Posts}],
+            [{drop_table, ~"posts"}, {drop_table, ~"users"}]
+        },
+        kura_schema_diff:diff(#{}, Desired)
+    ).
+
+diff_refuses_new_tables_that_reference_each_other_test() ->
     Desired = #{
         ~"a" => [#kura_column{name = b_id, type = integer, references = {~"b", id}}],
-        ~"b" => [#kura_column{name = a_id, type = integer, references = {~"a", id}}]
+        ~"b" => [#kura_column{name = a_id, type = integer, references = {~"a", id}}],
+        ~"c" => [#kura_column{name = a_id, type = integer, references = {~"a", id}}],
+        ~"d" => new_authors_table()
     },
-    ?assertMatch(
-        {_, [{drop_table, ~"a"}, {drop_table, ~"b"}]}, kura_schema_diff:diff(#{}, Desired)
+    ?assertError(
+        {kura_schema_diff, {reference_cycle, [~"a", ~"b"]}}, kura_schema_diff:diff(#{}, Desired)
     ).
+
+format_error_reference_cycle_test() ->
+    Msg = lists:flatten(kura_schema_diff:format_error({reference_cycle, [~"a", ~"b"]})),
+    ?assertNotEqual(nomatch, string:find(Msg, "\"a\", \"b\"")),
+    ?assertNotEqual(nomatch, string:find(Msg, "hand-written migration")).
 
 %%====================================================================
 %% Replay of create_table/4 (Taure/rebar3_kura#52)
