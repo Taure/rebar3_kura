@@ -242,9 +242,9 @@ diff(DbState, DesiredState) ->
                     ADown2 =
                         case ColDown of
                             [] -> ADownAcc;
-                            _ -> ADownAcc ++ [{alter_table, Table, ColDown}]
+                            _ -> [{alter_table, Table, ColDown} | ADownAcc]
                         end,
-                    {AUp2, ADown2, EUpAcc ++ EU, EDownAcc ++ ED}
+                    {AUp2, ADown2, EUpAcc ++ EU, ED ++ EDownAcc}
             end
         end,
         {[], [], [], []},
@@ -262,7 +262,7 @@ diff(DbState, DesiredState) ->
     ],
     IdxUp = lists:append([IU || {{IU, _}, _} <- IdxOps]),
     %% down/0 drops a new table, and its indexes with it.
-    IdxDown = lists:append([ID || {{_, ID}, false} <- IdxOps]),
+    IdxDown = lists:reverse(lists:append([ID || {{_, ID}, false} <- IdxOps])),
     {IdxDropUp, IdxCreateUp} = lists:partition(fun is_drop_index/1, IdxUp),
     {IdxDropDown, IdxCreateDown} = lists:partition(fun is_drop_index/1, IdxDown),
 
@@ -270,9 +270,10 @@ diff(DbState, DesiredState) ->
     %% drops an index along with a column it covers, so a later drop_index
     %% raises 42704; SQLite refuses to drop an indexed column at all.
     %%
-    %% down/0 undoes the table, column and constraint ops in the reverse of
-    %% the order up/0 ran them: a new table cannot be dropped while a column
-    %% or foreign key added in the same migration still references it.
+    %% down/0 undoes each step of up/0 in the reverse order, across groups,
+    %% tables and columns: a new table cannot be dropped while a column or
+    %% foreign key added in the same migration still references it. A
+    %% foreign key change is one step, so its undo still drops before it adds.
     {
         IdxDropUp ++ CreateUp ++ AlterUp ++ ExecUp ++ IdxCreateUp,
         IdxDropDown ++ ExecDown ++ AlterDown ++ CreateDown ++ IdxCreateDown
@@ -944,7 +945,7 @@ diff_columns(Table, DbCols, DesiredCols, FkMeta) ->
                     false ->
                         {
                             MU ++ [{modify_column, Name, DesCol#kura_column.type}],
-                            MD ++ [{modify_column, Name, DbCol#kura_column.type}]
+                            [{modify_column, Name, DbCol#kura_column.type} | MD]
                         }
                 end,
             ColBin = atom_to_binary(Name, utf8),
@@ -964,13 +965,13 @@ diff_columns(Table, DbCols, DesiredCols, FkMeta) ->
                                                 " DROP NOT NULL"
                                             >>}
                                         ],
-                                    ED ++
-                                        [
-                                            {execute, <<
-                                                (alter_column(Table, ColBin))/binary,
-                                                " SET NOT NULL"
-                                            >>}
-                                        ]
+                                    [
+                                        {execute, <<
+                                            (alter_column(Table, ColBin))/binary,
+                                            " SET NOT NULL"
+                                        >>}
+                                        | ED
+                                    ]
                                 };
                             false ->
                                 {
@@ -981,13 +982,13 @@ diff_columns(Table, DbCols, DesiredCols, FkMeta) ->
                                                 " SET NOT NULL"
                                             >>}
                                         ],
-                                    ED ++
-                                        [
-                                            {execute, <<
-                                                (alter_column(Table, ColBin))/binary,
-                                                " DROP NOT NULL"
-                                            >>}
-                                        ]
+                                    [
+                                        {execute, <<
+                                            (alter_column(Table, ColBin))/binary,
+                                            " DROP NOT NULL"
+                                        >>}
+                                        | ED
+                                    ]
                                 }
                         end
                 end,
@@ -999,17 +1000,22 @@ diff_columns(Table, DbCols, DesiredCols, FkMeta) ->
                     false ->
                         UpDef = default_sql(Table, ColBin, DesCol#kura_column.default),
                         DownDef = default_sql(Table, ColBin, DbCol#kura_column.default),
-                        {EU2 ++ [{execute, UpDef}], ED2 ++ [{execute, DownDef}]}
+                        {EU2 ++ [{execute, UpDef}], [{execute, DownDef} | ED2]}
                 end,
             %% Foreign key changes
             {FkUp, FkDown} = fk_ops(Table, Name, DbCol, DesCol, FkMeta),
-            {MU2, MD2, EU3 ++ FkUp, ED3 ++ FkDown}
+            {MU2, MD2, EU3 ++ FkUp, FkDown ++ ED3}
         end,
         {[], [], [], []},
         lists:sort(Common)
     ),
 
-    {AddUp ++ DropUp ++ ModUp, AddDown ++ DropDown ++ ModDown, ExecUp, ExecDown}.
+    {
+        AddUp ++ DropUp ++ ModUp,
+        ModDown ++ lists:reverse(DropDown, lists:reverse(AddDown)),
+        ExecUp,
+        ExecDown
+    }.
 
 %% An association edited on a table that already exists reaches the diff as a
 %% changed `references`/`on_delete` on a column both sides already have. There

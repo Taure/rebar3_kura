@@ -907,8 +907,8 @@ diff_drop_column_drops_its_index_first_test() ->
     ?assertMatch(
         [
             {alter_table, ~"t", [{add_column, #kura_column{name = x}}]},
-            {create_index, ~"t", [x], _},
-            {create_index, ~"t", [id], _}
+            {create_index, ~"t", [id], _},
+            {create_index, ~"t", [x], _}
         ],
         Down
     ).
@@ -2770,4 +2770,34 @@ diff_reference_cycle_names_only_tables_in_a_cycle_test() ->
     ?assertError(
         {kura_schema_diff, {reference_cycle, [~"a", ~"b", ~"c", ~"d"]}},
         kura_schema_diff:diff(#{}, Desired)
+    ).
+
+diff_down_is_up_reversed_across_tables_and_columns_test() ->
+    Db = #{
+        ~"t1" => [#kura_column{name = x, type = integer}, #kura_column{name = y, type = integer}],
+        ~"t2" => [#kura_column{name = x, type = integer}]
+    },
+    Desired = #{
+        ~"t1" => [
+            #kura_column{name = x, type = bigint, default = 1},
+            #kura_column{name = y, type = bigint, default = 2},
+            #kura_column{name = z, type = string},
+            #kura_column{name = w, type = string}
+        ],
+        ~"t2" => [#kura_column{name = x, type = integer, default = 3}]
+    },
+    {_Up, Down} = kura_schema_diff:diff(Db, Desired),
+    ?assertEqual(
+        [
+            {execute, ~"ALTER TABLE \"t2\" ALTER COLUMN \"x\" DROP DEFAULT"},
+            {execute, ~"ALTER TABLE \"t1\" ALTER COLUMN \"y\" DROP DEFAULT"},
+            {execute, ~"ALTER TABLE \"t1\" ALTER COLUMN \"x\" DROP DEFAULT"},
+            {alter_table, ~"t1", [
+                {modify_column, y, integer},
+                {modify_column, x, integer},
+                {drop_column, z},
+                {drop_column, w}
+            ]}
+        ],
+        Down
     ).
