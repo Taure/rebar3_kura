@@ -32,7 +32,15 @@
     ?IDENT,
     "\\s*\\)(.*)$"
 >>).
--define(DROP_FK_RE,
+-define(ADD_PK_RE, <<
+    "(?is)^ALTER\\s+TABLE\\s+",
+    ?IDENT,
+    "\\s+ADD\\s+(?:CONSTRAINT\\s+",
+    ?IDENT,
+    "\\s+)?PRIMARY\\s+KEY\\s*\\((.+)\\)$"
+>>).
+-define(IDENT_LIST_RE, <<"(?s)^\\s*", ?IDENT, "\\s*(?:,(.+))?$">>).
+-define(DROP_CONSTRAINT_RE,
     <<"(?is)^ALTER\\s+TABLE\\s+", ?IDENT, "\\s+DROP\\s+CONSTRAINT\\s+", ?IDENT, "$">>
 ).
 
@@ -46,6 +54,7 @@
     unsupported => [{module(), term()}],
     fk_names => #{fk_key() => binary()},
     fk_unowned => #{fk_key() => true},
+    pk_names => #{binary() => binary()},
     unreplayed => [binary()]
 }.
 -type operation() ::
@@ -79,7 +88,14 @@ build_db_state(MigModules) ->
             Ops = Mod:up(),
             apply_ops(Ops, Acc)
         end,
-        #{columns => #{}, indexes => #{}, fk_names => #{}, fk_unowned => #{}, unreplayed => []},
+        #{
+            columns => #{},
+            indexes => #{},
+            fk_names => #{},
+            fk_unowned => #{},
+            pk_names => #{},
+            unreplayed => []
+        },
         Sorted
     ).
 
@@ -436,6 +452,15 @@ format_error({fk_not_owned, Table, Col}) ->
         "hand-written migration",
         [Table, Col]
     );
+format_error({primary_key_changed, Table, Col, Joins}) when is_atom(Col), is_boolean(Joins) ->
+    io_lib:format(
+        "table \"~s\": the schema ~s, but the generator does not change a "
+        "primary key: dropping the old one fails while a foreign key depends "
+        "on it. Write this change as a hand-written migration, e.g. "
+        "{execute, ~~\"ALTER TABLE ~s DROP CONSTRAINT ~s_pkey\"} then "
+        "{execute, ~~\"ALTER TABLE ~s ADD PRIMARY KEY (...)\"}, which replay reads",
+        [Table, key_change(Joins, Col), Table, Table, Table]
+    );
 format_error({assoc_key_not_a_field, Mod, Name, FK}) ->
     io_lib:format(
         "~s: association '~s' names foreign key '~s', which is not a field on ~s",
@@ -477,6 +502,10 @@ format_error({on_delete_not_owned, Mod, Name, Type}) ->
 format_error(Reason) ->
     io_lib:format("~p", [Reason]).
 
+-spec key_change(boolean(), atom()) -> iolist().
+key_change(true, Col) -> io_lib:format("adds column '~s' to the primary key", [Col]);
+key_change(false, Col) -> io_lib:format("takes column '~s' out of the primary key", [Col]).
+
 format_atoms(Atoms) ->
     lists:join(", ", [atom_to_list(A) || A <- Atoms]).
 
@@ -493,7 +522,8 @@ apply_ops([{create_table, Name, Cols, Constraints} | Rest], State) ->
 apply_ops([{drop_table, Name} | Rest], #{columns := ColState, indexes := IdxState} = State) ->
     State1 = State#{
         columns => maps:remove(Name, ColState),
-        indexes => maps:remove(Name, IdxState)
+        indexes => maps:remove(Name, IdxState),
+        pk_names => maps:remove(Name, maps:get(pk_names, State, #{}))
     },
     apply_ops(Rest, forget_fk_meta(fun({T, _}) -> T =/= Name end, State1));
 apply_ops(
@@ -778,6 +808,7 @@ diff_columns(Table, DbCols, DesiredCols, FkMeta) ->
         fun(Name, {MU, MD, EU, ED}) ->
             DbCol = maps:get(Name, DbMap),
             DesCol = maps:get(Name, DesiredMap),
+            ok = assert_primary_key_kept(Table, Name, DbCol, DesCol),
             %% Type changes
             {MU2, MD2} =
                 case types_equal(DbCol#kura_column.type, DesCol#kura_column.type) of
@@ -979,13 +1010,19 @@ types_equal(A, B) -> A =:= B.
 is_nullable(#kura_column{primary_key = true}) -> false;
 is_nullable(#kura_column{nullable = Nullable}) -> Nullable.
 
-%% The generator does not change primary keys, and Postgres refuses DROP NOT
-%% NULL on a column still in one, so a column gaining or losing its primary
-%% key is not a nullability change here.
-nullable_changed(#kura_column{primary_key = PK} = DbCol, #kura_column{primary_key = PK} = DesCol) ->
-    is_nullable(DbCol) =/= is_nullable(DesCol);
-nullable_changed(_DbCol, _DesCol) ->
-    false.
+nullable_changed(DbCol, DesCol) ->
+    is_nullable(DbCol) =/= is_nullable(DesCol).
+
+%% A primary key change is refused rather than generated. Dropping the old
+%% key fails while another table's foreign key depends on it, and only the
+%% author knows which of those constraints to move and in what order. Replay
+%% reads the hand-written ALTER TABLE ... DROP CONSTRAINT / ADD PRIMARY KEY
+%% that does it, so the refusal clears once that migration exists.
+-spec assert_primary_key_kept(binary(), atom(), #kura_column{}, #kura_column{}) -> ok.
+assert_primary_key_kept(_, _, #kura_column{primary_key = PK}, #kura_column{primary_key = PK}) ->
+    ok;
+assert_primary_key_kept(Table, Name, _DbCol, #kura_column{primary_key = PK}) ->
+    error({kura_schema_diff, {primary_key_changed, Table, Name, PK}}).
 
 col_map(Cols) ->
     maps:from_list([{C#kura_column.name, C} || C <- Cols]).
@@ -1038,14 +1075,92 @@ replay_fk_add(Stmt, State) ->
                     nomatch
             end;
         nomatch ->
-            replay_fk_drop(Stmt, State)
+            replay_pk_add(Stmt, State)
     end.
 
-replay_fk_drop(Stmt, State) ->
-    case captures(Stmt, ?DROP_FK_RE, 4) of
-        {match, [TQ, TB, NQ, NB]} -> drop_fk(ident(TQ, TB), ident(NQ, NB), State);
+-spec replay_pk_add(binary(), db_state()) -> {ok, db_state()} | nomatch.
+replay_pk_add(Stmt, State) ->
+    case captures(Stmt, ?ADD_PK_RE, 5) of
+        {match, [TQ, TB, NQ, NB, ColList]} ->
+            Table = ident(TQ, TB),
+            case existing_columns(Table, ident_list(ColList), State) of
+                {ok, Cols} -> {ok, add_pk(Table, Cols, ident(NQ, NB), State)};
+                error -> nomatch
+            end;
+        nomatch ->
+            replay_constraint_drop(Stmt, State)
+    end.
+
+-spec replay_constraint_drop(binary(), db_state()) -> {ok, db_state()} | nomatch.
+replay_constraint_drop(Stmt, State) ->
+    case captures(Stmt, ?DROP_CONSTRAINT_RE, 4) of
+        {match, [TQ, TB, NQ, NB]} -> drop_constraint(ident(TQ, TB), ident(NQ, NB), State);
         nomatch -> nomatch
     end.
+
+-spec drop_constraint(binary(), binary(), db_state()) -> {ok, db_state()} | nomatch.
+drop_constraint(Table, Constraint, State) ->
+    case drop_fk(Table, Constraint, State) of
+        {ok, State1} -> {ok, State1};
+        nomatch -> drop_pk(Table, Constraint, State)
+    end.
+
+-spec ident_list(binary()) -> [binary()] | error.
+ident_list(Bin) ->
+    case captures(Bin, ?IDENT_LIST_RE, 3) of
+        {match, [Q, B, <<>>]} -> [ident(Q, B)];
+        {match, [Q, B, Rest]} -> more_idents(ident(Q, B), ident_list(Rest));
+        nomatch -> error
+    end.
+
+-spec more_idents(binary(), [binary()] | error) -> [binary()] | error.
+more_idents(_Ident, error) -> error;
+more_idents(Ident, Idents) -> [Ident | Idents].
+
+-spec existing_columns(binary(), [binary()] | error, db_state()) -> {ok, [atom()]} | error.
+existing_columns(_Table, error, _State) ->
+    error;
+existing_columns(Table, Cols, State) ->
+    Found = [Atom || Col <- Cols, {ok, Atom} <- [existing_column(Table, Col, State)]],
+    case length(Found) =:= length(Cols) of
+        true -> {ok, Found};
+        false -> error
+    end.
+
+%% PostgreSQL's own name for an unnamed primary key constraint.
+-spec pk_name(binary(), db_state()) -> binary().
+pk_name(Table, State) ->
+    maps:get(Table, maps:get(pk_names, State, #{}), <<Table/binary, "_pkey">>).
+
+-spec add_pk(binary(), [atom()], binary(), db_state()) -> db_state().
+add_pk(Table, Key, Name, #{columns := ColState} = State) ->
+    PkNames = maps:get(pk_names, State, #{}),
+    State1 =
+        case Name of
+            <<>> -> State#{pk_names => maps:remove(Table, PkNames)};
+            _ -> State#{pk_names => PkNames#{Table => Name}}
+        end,
+    State1#{columns => ColState#{Table => with_primary_key(maps:get(Table, ColState), Key)}}.
+
+%% The key's columns stay NOT NULL after the constraint goes.
+-spec drop_pk(binary(), binary(), db_state()) -> {ok, db_state()} | nomatch.
+drop_pk(Table, Constraint, #{columns := ColState} = State) ->
+    Cols = maps:get(Table, ColState, []),
+    Keyed = lists:keymember(true, #kura_column.primary_key, Cols),
+    case Keyed andalso pk_name(Table, State) =:= Constraint of
+        true ->
+            Unkeyed = [unkey(C) || C <- Cols],
+            PkNames = maps:remove(Table, maps:get(pk_names, State, #{})),
+            {ok, State#{columns => ColState#{Table => Unkeyed}, pk_names => PkNames}};
+        false ->
+            nomatch
+    end.
+
+-spec unkey(#kura_column{}) -> #kura_column{}.
+unkey(#kura_column{primary_key = true} = C) ->
+    C#kura_column{primary_key = false, nullable = false};
+unkey(C) ->
+    C.
 
 %% Every group is asked for by number: PCRE leaves unset trailing groups out
 %% of an all_but_first capture, and an identifier's unused form is unset.

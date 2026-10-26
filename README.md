@@ -101,9 +101,23 @@ The pre-compile hook detects:
 It does **not** auto-generate:
 
 - `drop_table` operations (destructive — write manually)
-- Nullable-only changes
-- Default value changes
-- Primary key changes
+- Primary key changes (refused, see below)
+
+### Primary key changes
+
+A field gaining or losing `primary_key = true` on a table that already exists
+is refused, not generated: the run aborts with `primary_key_changed`, naming
+the table and the column. Dropping the old key fails while another table's
+foreign key depends on it, and only the author knows which of those to move
+first, so the change needs a hand-written migration. Replay reads the two
+statements it is usually made of, each in its own `execute`:
+
+- `ALTER TABLE t DROP CONSTRAINT name`, for the table's primary key under
+  `<table>_pkey` or the name a replayed `ADD CONSTRAINT` gave it. The key's
+  columns stay `NOT NULL`, as they do in PostgreSQL.
+- `ALTER TABLE t ADD [CONSTRAINT name] PRIMARY KEY (c, ...)`
+
+Once that migration exists the refusal clears.
 
 ### Foreign keys from associations
 
