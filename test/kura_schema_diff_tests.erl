@@ -210,7 +210,7 @@ build_desired_state_test() ->
 
 build_desired_state_empty_test() ->
     ?assertEqual(
-        #{columns => #{}, indexes => #{}, unsupported => []},
+        #{columns => #{}, indexes => #{}, keys => #{}, unsupported => []},
         kura_schema_diff:build_desired_state([])
     ).
 
@@ -2647,3 +2647,108 @@ eval_snippet(Snippet) ->
     {ok, Exprs} = erl_parse:parse_exprs(Tokens),
     {value, Value, _} = erl_eval:exprs(Exprs, erl_eval:new_bindings()),
     Value.
+
+%%====================================================================
+%% The key comes from kura_schema:key/1, so key/0 wins over the flags
+%%====================================================================
+
+keyed_schema(Mod, Key, Fields) ->
+    meck:new(Mod, [non_strict]),
+    meck:expect(Mod, table, fun() -> ~"memberships" end),
+    meck:expect(Mod, fields, fun() -> Fields end),
+    meck:expect(Mod, key, fun() -> Key end),
+    Mod.
+
+membership_fields() ->
+    [
+        #kura_field{name = org_id, type = uuid, nullable = false},
+        #kura_field{name = user_id, type = uuid, nullable = false},
+        #kura_field{name = role, type = string}
+    ].
+
+membership_columns() ->
+    [
+        #kura_column{name = org_id, type = uuid, nullable = false},
+        #kura_column{name = user_id, type = uuid, nullable = false},
+        #kura_column{name = role, type = string}
+    ].
+
+desired_state_takes_a_composite_key_from_key_0_test() ->
+    Mod = keyed_schema(membership_k1, [org_id, user_id], membership_fields()),
+    try
+        Desired = kura_schema_diff:build_desired_state([Mod]),
+        {Up, Down} = kura_schema_diff:diff(#{}, Desired),
+        ?assertEqual(
+            [
+                {create_table, ~"memberships", membership_columns(), [
+                    {primary_key, [org_id, user_id]}
+                ]}
+            ],
+            Up
+        ),
+        ?assertEqual([{drop_table, ~"memberships"}], Down),
+        ?assertEqual({[], []}, kura_schema_diff:diff(replay(Up), Desired))
+    after
+        meck:unload(Mod)
+    end.
+
+desired_state_keeps_the_key_0_order_test() ->
+    Mod = keyed_schema(membership_k2, [user_id, org_id], membership_fields()),
+    try
+        {Up, _} = kura_schema_diff:diff(#{}, kura_schema_diff:build_desired_state([Mod])),
+        ?assertMatch([{create_table, _, _, [{primary_key, [user_id, org_id]}]}], Up)
+    after
+        meck:unload(Mod)
+    end.
+
+desired_state_key_0_wins_over_primary_key_flags_test() ->
+    Fields = [#kura_field{name = id, type = id, primary_key = true} | membership_fields()],
+    Mod = keyed_schema(membership_k3, [org_id, user_id], Fields),
+    try
+        Desired = kura_schema_diff:build_desired_state([Mod]),
+        Db = replay([
+            {create_table, ~"memberships",
+                [#kura_column{name = id, type = id} | membership_columns()], [
+                    {primary_key, [org_id, user_id]}
+                ]}
+        ]),
+        ?assertEqual({[], []}, kura_schema_diff:diff(Db, Desired))
+    after
+        meck:unload(Mod)
+    end.
+
+desired_state_takes_a_single_key_from_key_0_test() ->
+    Mod = keyed_schema(membership_k4, [id], [#kura_field{name = id, type = id}]),
+    try
+        {Up, _} = kura_schema_diff:diff(#{}, kura_schema_diff:build_desired_state([Mod])),
+        ?assertEqual(
+            [
+                {create_table, ~"memberships", [
+                    #kura_column{name = id, type = id, primary_key = true}
+                ]}
+            ],
+            Up
+        )
+    after
+        meck:unload(Mod)
+    end.
+
+desired_state_refuses_a_key_naming_no_field_test() ->
+    Mod = keyed_schema(membership_k5, [org_id, nope], membership_fields()),
+    try
+        ?assertError(
+            {kura_schema_diff, {key_unknown_field, membership_k5, nope}},
+            kura_schema_diff:build_desired_state([Mod])
+        ),
+        ?assertNotEqual(
+            nomatch,
+            string:find(
+                lists:flatten(
+                    kura_schema_diff:format_error({key_unknown_field, membership_k5, nope})
+                ),
+                "key/0 names 'nope'"
+            )
+        )
+    after
+        meck:unload(Mod)
+    end.

@@ -103,10 +103,12 @@ It does **not** auto-generate:
 - `drop_table` operations (destructive — write manually)
 - Primary key changes (refused, see below)
 
-A new table with a composite primary key is generated as
-`{create_table, Name, Columns, [{primary_key, Key}]}`, in the column order the
-schema declares, since `PRIMARY KEY` on each column would declare the key more
-than once.
+A table's primary key is the schema's own, as `kura_schema:key/1` resolves
+it: the optional `key/0` callback when the schema has one, otherwise the
+fields marked `primary_key = true`. A new table with a composite key is
+generated as `{create_table, Name, Columns, [{primary_key, Key}]}`, in that
+key order and with the key columns `NOT NULL`, since `PRIMARY KEY` on each
+column would declare the key more than once.
 
 New tables are created after the new tables they reference, and `down/0`
 drops them in the reverse order. New tables that reference each other in a

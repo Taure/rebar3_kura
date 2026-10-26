@@ -55,6 +55,7 @@
     fk_names => #{fk_key() => binary()},
     fk_unowned => #{fk_key() => true},
     pk_names => #{binary() => binary()},
+    keys => #{binary() => [atom()]},
     unreplayed => [binary()]
 }.
 -type operation() ::
@@ -104,7 +105,7 @@ build_db_state(MigModules) ->
 build_desired_state(SchemaModules) ->
     lists:foldl(
         fun desired_state_for/2,
-        #{columns => #{}, indexes => #{}, unsupported => []},
+        #{columns => #{}, indexes => #{}, keys => #{}, unsupported => []},
         SchemaModules
     ).
 
@@ -112,21 +113,55 @@ build_desired_state(SchemaModules) ->
 %% aborting the run: one composite foreign key must not stop every other table
 %% in the application being checked for drift. Everything else is a mistake the
 %% author can fix, so it still aborts.
-desired_state_for(Mod, #{columns := ColAcc, indexes := IdxAcc, unsupported := Unsup} = Acc) ->
+desired_state_for(
+    Mod, #{columns := ColAcc, indexes := IdxAcc, keys := KeyAcc, unsupported := Unsup} = Acc
+) ->
     try
         Table = Mod:table(),
         Fields = Mod:fields(),
-        Columns = [field_to_column(F) || F <- Fields, F#kura_field.virtual =/= true],
+        Key = schema_key(Mod, Fields),
+        Columns = [
+            with_key(field_to_column(F), Key)
+         || F <- Fields, F#kura_field.virtual =/= true
+        ],
         Enriched = enrich_with_associations(Mod, Columns),
         Indexes = extract_indexes(Mod),
         ok = check_index_columns(Mod, Indexes, Enriched),
-        Acc#{columns => ColAcc#{Table => Enriched}, indexes => IdxAcc#{Table => Indexes}}
+        Acc#{
+            columns => ColAcc#{Table => Enriched},
+            indexes => IdxAcc#{Table => Indexes},
+            keys => KeyAcc#{Table => Key}
+        }
     catch
         error:{kura_schema_diff, {composite_assoc_unsupported, _, _} = Reason} ->
             Acc#{unsupported => Unsup ++ [{Mod, Reason}]};
         error:{kura_schema_diff, {composite_target_key, _, _, _, _} = Reason} ->
             Acc#{unsupported => Unsup ++ [{Mod, Reason}]}
     end.
+
+%% kura_schema:key/1 is the schema's own key: key/0 when the schema has it,
+%% which is how a composite key is documented, and the primary_key = true
+%% fields otherwise. The flags alone missed a key/0 key entirely.
+-spec schema_key(module(), [#kura_field{}]) -> [atom()].
+schema_key(Mod, Fields) ->
+    Names =
+        try
+            kura_schema:key(Mod)
+        catch
+            error:{no_primary_key, Mod} -> []
+        end,
+    [key_column(Mod, Name, Fields) || Name <- Names].
+
+-spec key_column(module(), atom(), [#kura_field{}]) -> atom().
+key_column(Mod, Name, Fields) ->
+    case [F || F <- Fields, F#kura_field.name =:= Name] of
+        [Field | _] -> (field_to_column(Field))#kura_column.name;
+        [] -> error({kura_schema_diff, {key_unknown_field, Mod, Name}})
+    end.
+
+-spec with_key(#kura_column{}, [atom()]) -> #kura_column{}.
+with_key(Col, Key) ->
+    Col#kura_column{primary_key = lists:member(Col#kura_column.name, Key)}.
 
 -doc """
 Schemas excluded from a desired state because the generator cannot express
@@ -177,11 +212,15 @@ diff(DbState, DesiredState) ->
     DesiredIdx = maps:get(indexes, ensure_structured(DesiredState), #{}),
     FkMeta = {maps:get(fk_names, DbState, #{}), maps:get(fk_unowned, DbState, #{})},
     PkNames = maps:get(pk_names, DbState, #{}),
+    DesiredKeys = maps:get(keys, DesiredState, #{}),
 
     %% New tables: in desired but not in DB
     NewTables = lists:sort(maps:keys(DesiredCols) -- maps:keys(DbCols)),
     CreateOrder = create_order(NewTables, DesiredCols),
-    CreateUp = [create_table(Table, maps:get(Table, DesiredCols)) || Table <- CreateOrder],
+    CreateUp = [
+        create_table(Table, maps:get(Table, DesiredCols), maps:get(Table, DesiredKeys, undefined))
+     || Table <- CreateOrder
+    ],
     CreateDown = [{drop_table, Table} || Table <- lists:reverse(CreateOrder)],
 
     %% Existing tables: diff columns
@@ -241,12 +280,15 @@ diff(DbState, DesiredState) ->
 
 %% kura writes PRIMARY KEY inline on each column that has primary_key set,
 %% which for a composite key declares the key twice and fails. A composite
-%% key is a table constraint instead, in the column order the schema gives.
+%% key is a table constraint instead, in the order key/0 gives or else the
+%% order of the fields.
 %% Its columns are written NOT NULL: SQLite, unlike PostgreSQL, lets a
 %% composite key column hold NULL, and then (1, NULL) is not unique.
--spec create_table(binary(), [#kura_column{}]) -> operation().
-create_table(Table, Cols) ->
-    case key_columns(Cols) of
+-spec create_table(binary(), [#kura_column{}], [atom()] | undefined) -> operation().
+create_table(Table, Cols, undefined) ->
+    create_table(Table, Cols, key_columns(Cols));
+create_table(Table, Cols, Key) ->
+    case Key of
         [_, _ | _] = Key ->
             {create_table, Table, [unkeyed_not_null(C) || C <- Cols], [{primary_key, Key}]};
         _ ->
@@ -504,6 +546,8 @@ format_error({primary_key_changed, Table, Col, Joins, Constraint}) when
             sigil(<<AlterTable/binary, " ADD PRIMARY KEY (...)">>)
         ]
     );
+format_error({key_unknown_field, Mod, Name}) ->
+    io_lib:format("~s: key/0 names '~s', which is not a field of ~s", [Mod, Name, Mod]);
 format_error({reference_cycle, Tables}) when is_list(Tables) ->
     io_lib:format(
         "new tables ~s reference each other, so no order of CREATE TABLE "
