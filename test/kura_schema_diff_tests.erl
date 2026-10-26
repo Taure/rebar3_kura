@@ -2618,3 +2618,11 @@ diff_leaves_an_existing_nullable_composite_key_column_alone_test() ->
         ]
     },
     ?assertEqual({[], []}, kura_schema_diff:diff(State, Desired)).
+
+diff_refusal_survives_a_table_name_that_is_not_utf8_test() ->
+    Table = binary:copy(<<16#80>>, 70),
+    Db = #{Table => [#kura_column{name = id, type = id, primary_key = true}]},
+    ?assertError(
+        {kura_schema_diff, {primary_key_changed, Table, id, false, ~"_pkey"}},
+        kura_schema_diff:diff(Db, #{Table => [#kura_column{name = id, type = id}]})
+    ).

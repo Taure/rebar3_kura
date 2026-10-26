@@ -1219,6 +1219,8 @@ default_pk_name(Table) ->
 -spec clip(binary(), non_neg_integer()) -> binary().
 clip(Bin, Max) when byte_size(Bin) =< Max ->
     Bin;
+clip(_Bin, 0) ->
+    <<>>;
 clip(Bin, Max) ->
     case binary:at(Bin, Max) of
         Continuation when Continuation band 16#C0 =:= 16#80 -> clip(Bin, Max - 1);
