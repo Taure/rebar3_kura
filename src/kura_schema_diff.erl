@@ -181,7 +181,7 @@ diff(DbState, DesiredState) ->
     %% New tables: in desired but not in DB
     NewTables = lists:sort(maps:keys(DesiredCols) -- maps:keys(DbCols)),
     CreateOrder = create_order(NewTables, DesiredCols),
-    CreateUp = [{create_table, Table, maps:get(Table, DesiredCols)} || Table <- CreateOrder],
+    CreateUp = [create_table(Table, maps:get(Table, DesiredCols)) || Table <- CreateOrder],
     CreateDown = [{drop_table, Table} || Table <- lists:reverse(CreateOrder)],
 
     %% Existing tables: diff columns
@@ -238,6 +238,20 @@ diff(DbState, DesiredState) ->
         IdxDropUp ++ CreateUp ++ AlterUp ++ ExecUp ++ IdxCreateUp,
         IdxDropDown ++ ExecDown ++ AlterDown ++ CreateDown ++ IdxCreateDown
     }.
+
+%% kura writes PRIMARY KEY inline on each column that has primary_key set,
+%% which for a composite key declares the key twice and fails. A composite
+%% key is a table constraint instead, in the column order the schema gives.
+-spec create_table(binary(), [#kura_column{}]) -> operation().
+create_table(Table, Cols) ->
+    case key_columns(Cols) of
+        [_, _ | _] = Key ->
+            {create_table, Table, [C#kura_column{primary_key = false} || C <- Cols], [
+                {primary_key, Key}
+            ]};
+        _ ->
+            {create_table, Table, Cols}
+    end.
 
 %% CREATE TABLE writes REFERENCES inline, so a new table is created once
 %% every other new table it references exists. Tables that reference each
@@ -1080,7 +1094,7 @@ assert_primary_key_kept(Table, DbCols, DesiredCols, PkNames) ->
 
 -spec key_columns([#kura_column{}]) -> [atom()].
 key_columns(Cols) ->
-    lists:sort([C#kura_column.name || C <- Cols, C#kura_column.primary_key]).
+    [C#kura_column.name || C <- Cols, C#kura_column.primary_key].
 
 col_map(Cols) ->
     maps:from_list([{C#kura_column.name, C} || C <- Cols]).

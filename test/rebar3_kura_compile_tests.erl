@@ -32,6 +32,32 @@ generate_create_table_test() ->
     ?assertEqual(false, NameCol#kura_column.nullable),
     cleanup_mod(Mod).
 
+generate_create_table_with_constraints_test() ->
+    UpOps = [
+        {create_table, <<"t">>,
+            [#kura_column{name = a, type = integer}, #kura_column{name = b, type = integer}], [
+                {primary_key, [a, b]}, {unique, [b]}, {check, <<"a > 0">>}
+            ]}
+    ],
+    DownOps = [{drop_table, <<"t">>}],
+    {ok, Mod} = compile_generated_migration("create_t_constraints", UpOps, DownOps),
+    try
+        ?assertEqual(UpOps, Mod:up()),
+        ?assertEqual(DownOps, Mod:down())
+    after
+        cleanup_mod(Mod)
+    end.
+
+derive_description_names_a_created_table_test() ->
+    Cols = [#kura_column{name = a, type = integer}],
+    ?assertEqual(
+        "create_t",
+        rebar3_kura_compile:derive_description([{create_table, <<"t">>, Cols, [{primary_key, [a]}]}])
+    ),
+    ?assertEqual(
+        "create_t", rebar3_kura_compile:derive_description([{create_table, <<"t">>, Cols}])
+    ).
+
 generate_alter_add_column_test() ->
     UpOps = [
         {alter_table, <<"pets">>, [

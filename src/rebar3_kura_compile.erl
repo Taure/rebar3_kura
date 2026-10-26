@@ -13,6 +13,10 @@
     report_unreplayed/1
 ]).
 
+-ifdef(TEST).
+-export([derive_description/1]).
+-endif.
+
 -include_lib("kura/include/kura.hrl").
 
 -define(PROVIDER, compile).
@@ -240,10 +244,9 @@ make_timestamp(MigDir) ->
 derive_description(Ops) ->
     case Ops of
         [{create_table, Table, _} | Rest] ->
-            case lists:all(fun is_index_op/1, Rest) of
-                true -> "create_" ++ binary_to_list(Table);
-                false -> "update_schema"
-            end;
+            created(Table, Rest);
+        [{create_table, Table, _, _} | Rest] ->
+            created(Table, Rest);
         [{alter_table, Table, _}] ->
             "alter_" ++ binary_to_list(Table);
         [{alter_table, Table, _} | Rest] when Rest =/= [] ->
@@ -255,6 +258,12 @@ derive_description(Ops) ->
             "drop_" ++ binary_to_list(Table);
         _ ->
             "update_schema"
+    end.
+
+created(Table, Rest) ->
+    case lists:all(fun is_index_op/1, Rest) of
+        true -> "create_" ++ binary_to_list(Table);
+        false -> "update_schema"
     end.
 
 is_index_op({create_index, _, _, _}) -> true;
@@ -290,6 +299,12 @@ render_ops(Ops) ->
 render_op({create_table, Table, Cols}) ->
     ColStrs = lists:join(",\n        ", [render_column(C) || C <- Cols]),
     io_lib:format("{create_table, ~s, [~n        ~s~n    ]}", [sigil(Table), ColStrs]);
+render_op({create_table, Table, Cols, Constraints}) ->
+    ColStrs = lists:join(",\n        ", [render_column(C) || C <- Cols]),
+    io_lib:format(
+        "{create_table, ~s, [~n        ~s~n    ], ~s}",
+        [sigil(Table), ColStrs, render_constraints(Constraints)]
+    );
 render_op({drop_table, Table}) ->
     io_lib:format("{drop_table, ~s}", [sigil(Table)]);
 render_op({alter_table, Table, AlterOps}) ->
@@ -310,6 +325,14 @@ render_op({execute, SQL}) ->
 sigil(Bin) ->
     Escaped = binary:replace(Bin, [<<$\\>>, <<$">>], <<$\\>>, [global, {insert_replaced, 1}]),
     [$~, $", Escaped, $"].
+
+render_constraints(Constraints) ->
+    ["[", lists:join(", ", [render_constraint(C) || C <- Constraints]), "]"].
+
+render_constraint({check, Expr}) ->
+    ["{check, ", sigil(Expr), "}"];
+render_constraint({Kind, Cols}) ->
+    io_lib:format("{~p, ~p}", [Kind, Cols]).
 
 render_alter_op({add_column, Col}) ->
     io_lib:format("{add_column, ~s}", [render_column(Col)]);

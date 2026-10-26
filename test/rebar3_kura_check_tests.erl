@@ -145,6 +145,18 @@ drift_when_schema_declares_a_new_table_test() ->
 %% format_error
 %%====================================================================
 
+describe_op_names_a_table_created_with_constraints_test() ->
+    ?assertEqual(
+        "missing CREATE TABLE \"t\"",
+        lists:flatten(
+            rebar3_kura_check:describe_op(
+                {create_table, <<"t">>, [#kura_column{name = a, type = integer}], [
+                    {primary_key, [a]}
+                ]}
+            )
+        )
+    ).
+
 format_error_for_schema_drift_test() ->
     %% The exact phrasing is part of the contract: it points users at
     %% the next action (`rebar3 kura compile`) so a CI failure is

@@ -2560,3 +2560,43 @@ replay_rename_leaves_other_references_alone_test() ->
     ]),
     ?assertEqual({~"users", code}, (col(State, ~"posts", user_code))#kura_column.references),
     ?assertEqual({~"teams", id}, (col(State, ~"posts", team_id))#kura_column.references).
+
+%%====================================================================
+%% A composite key is created as a table constraint
+%%====================================================================
+
+composite_desired() ->
+    #{
+        ~"t" => [
+            #kura_column{name = b, type = integer, primary_key = true},
+            #kura_column{name = a, type = integer, primary_key = true},
+            #kura_column{name = c, type = string}
+        ]
+    }.
+
+diff_creates_a_composite_key_as_a_table_constraint_test() ->
+    ?assertEqual(
+        {
+            [
+                {create_table, ~"t",
+                    [
+                        #kura_column{name = b, type = integer},
+                        #kura_column{name = a, type = integer},
+                        #kura_column{name = c, type = string}
+                    ],
+                    [{primary_key, [b, a]}]}
+            ],
+            [{drop_table, ~"t"}]
+        },
+        kura_schema_diff:diff(#{}, composite_desired())
+    ).
+
+diff_composite_key_round_trips_through_replay_test() ->
+    {Up, _Down} = kura_schema_diff:diff(#{}, composite_desired()),
+    ?assertEqual({[], []}, kura_schema_diff:diff(replay(Up), composite_desired())).
+
+diff_keeps_a_single_key_inline_test() ->
+    Cols = [#kura_column{name = id, type = id, primary_key = true}],
+    ?assertMatch(
+        {[{create_table, ~"t", Cols}], _}, kura_schema_diff:diff(#{}, #{~"t" => Cols})
+    ).
