@@ -2306,14 +2306,11 @@ replay_create_table_notes_constraints_it_cannot_model_test() ->
     State = replay([
         {create_table, ~"t",
             [#kura_column{name = a, type = string}, #kura_column{name = b, type = integer}], [
-                {unique, [a, b]}, {check, ~"b > 0"}
+                {unique, [a, b]}, {check, ~"b > 0"}, {unique, [b]}
             ]}
     ]),
     ?assertEqual(
-        [
-            ~"CREATE TABLE \"t\" (... UNIQUE (\"a\", \"b\"))",
-            ~"CREATE TABLE \"t\" (... CHECK (b > 0))"
-        ],
+        [~"CREATE TABLE \"t\" (... UNIQUE (\"a\", \"b\"), UNIQUE (\"b\"))"],
         kura_schema_diff:unreplayed_executes(State)
     ),
     ?assertEqual([a, b], [C#kura_column.name || C <- maps:get(~"t", cols(State))]).
@@ -2801,3 +2798,9 @@ diff_down_is_up_reversed_across_tables_and_columns_test() ->
         ],
         Down
     ).
+
+replay_create_table_check_constraint_is_not_noted_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = b, type = integer}], [{check, ~"b > 0"}]}
+    ]),
+    ?assertEqual([], kura_schema_diff:unreplayed_executes(State)).

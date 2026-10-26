@@ -681,24 +681,21 @@ with_primary_key(Cols, Key) ->
      || C <- Cols
     ].
 
-%% A unique constraint is an index replay does not record, and a check is
-%% nothing replay records, so both are reported the way an unread execute is.
+%% A unique constraint is an index replay does not record, so a schema that
+%% declares the same unique index sees drift that is not there; one note per
+%% table names them all. A check constraint is nothing the diff compares, so
+%% it would only add a warning to every run.
 -spec note_constraints(binary(), [kura_migration:table_constraint()], db_state()) -> db_state().
 note_constraints(Table, Constraints, State) ->
-    Noted = [
-        iolist_to_binary([~"CREATE TABLE ", quote(Table), ~" (... ", Clause, ~")"])
-     || C <- Constraints,
-        {unmodelled, Clause} <- [constraint_clause(C)]
-    ],
-    State#{unreplayed => maps:get(unreplayed, State, []) ++ Noted}.
-
--spec constraint_clause(kura_migration:table_constraint()) -> modelled | {unmodelled, iodata()}.
-constraint_clause({primary_key, _Cols}) ->
-    modelled;
-constraint_clause({unique, Cols}) ->
-    {unmodelled, [~"UNIQUE (", quoted_columns(Cols), ~")"]};
-constraint_clause({check, Expr}) ->
-    {unmodelled, [~"CHECK (", Expr, ~")"]}.
+    case [[~"UNIQUE (", quoted_columns(Cols), ~")"] || {unique, Cols} <- Constraints] of
+        [] ->
+            State;
+        Clauses ->
+            Note = iolist_to_binary([
+                ~"CREATE TABLE ", quote(Table), ~" (... ", lists:join(~", ", Clauses), ~")"
+            ]),
+            State#{unreplayed => maps:get(unreplayed, State, []) ++ [Note]}
+    end.
 
 -spec quoted_columns([atom()]) -> iodata().
 quoted_columns(Cols) ->

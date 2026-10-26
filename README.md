@@ -235,9 +235,11 @@ a drift report that follows one can be read with that in mind.
 
 A `{create_table, Name, Columns, Constraints}` is replayed like the
 three-element form. A `{primary_key, Cols}` constraint marks those columns as
-the primary key. A `{unique, Cols}` or `{check, Expr}` constraint is not
-modelled, so `compile` and `check` print it with the same warning as an
-unreplayed `execute`.
+the primary key. `{unique, Cols}` constraints are not modelled, so `compile`
+and `check` print one warning per table that has them, the same warning as an
+unreplayed `execute`: a schema declaring the same unique index sees drift
+that is not there. A `{check, Expr}` constraint is not modelled either, but
+nothing the diff compares depends on it, so it is not reported.
 
 ### Enum handling
 
