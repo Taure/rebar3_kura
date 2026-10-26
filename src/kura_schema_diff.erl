@@ -176,6 +176,7 @@ diff(DbState, DesiredState) ->
     DbIdx = maps:get(indexes, ensure_structured(DbState), #{}),
     DesiredIdx = maps:get(indexes, ensure_structured(DesiredState), #{}),
     FkMeta = {maps:get(fk_names, DbState, #{}), maps:get(fk_unowned, DbState, #{})},
+    PkNames = maps:get(pk_names, DbState, #{}),
 
     %% New tables: in desired but not in DB
     NewTables = lists:sort(maps:keys(DesiredCols) -- maps:keys(DbCols)),
@@ -189,6 +190,7 @@ diff(DbState, DesiredState) ->
         fun(Table, {AUpAcc, ADownAcc, EUpAcc, EDownAcc}) ->
             DbTableCols = maps:get(Table, DbCols, []),
             DesiredTableCols = maps:get(Table, DesiredCols),
+            ok = assert_primary_key_kept(Table, DbTableCols, DesiredTableCols, PkNames),
             case diff_columns(Table, DbTableCols, DesiredTableCols, FkMeta) of
                 {[], [], [], []} ->
                     {AUpAcc, ADownAcc, EUpAcc, EDownAcc};
@@ -462,14 +464,20 @@ format_error({fk_not_owned, Table, Col}) ->
         "hand-written migration",
         [Table, Col]
     );
-format_error({primary_key_changed, Table, Col, Joins}) when is_atom(Col), is_boolean(Joins) ->
+format_error({primary_key_changed, Table, Col, Joins, Constraint}) when
+    is_atom(Col), is_boolean(Joins)
+->
     io_lib:format(
         "table \"~s\": the schema ~s, but the generator does not change a "
         "primary key: dropping the old one fails while a foreign key depends "
-        "on it. Write this change as a hand-written migration, e.g. "
-        "{execute, ~~\"ALTER TABLE ~s DROP CONSTRAINT ~s_pkey\"} then "
-        "{execute, ~~\"ALTER TABLE ~s ADD PRIMARY KEY (...)\"}, which replay reads",
-        [Table, key_change(Joins, Col), Table, Table, Table]
+        "on it. Write this change as a hand-written migration, which replay "
+        "reads. On PostgreSQL: {execute, ~~\"ALTER TABLE \\\"~s\\\" DROP CONSTRAINT "
+        "\\\"~s\\\"\"} then {execute, ~~\"ALTER TABLE \\\"~s\\\" ADD PRIMARY KEY (...)\"}. "
+        "On SQLite, which cannot alter a key, rebuild the table: create_table/4 "
+        "a copy with {primary_key, [...]}, copy the rows with an execute, "
+        "drop_table the original, create_table/4 it again and copy the rows "
+        "back, then drop_table the copy",
+        [Table, key_change(Joins, Col), Table, Constraint, Table]
     );
 format_error({reference_cycle, Tables}) when is_list(Tables) ->
     io_lib:format(
@@ -845,7 +853,6 @@ diff_columns(Table, DbCols, DesiredCols, FkMeta) ->
         fun(Name, {MU, MD, EU, ED}) ->
             DbCol = maps:get(Name, DbMap),
             DesCol = maps:get(Name, DesiredMap),
-            ok = assert_primary_key_kept(Table, Name, DbCol, DesCol),
             %% Type changes
             {MU2, MD2} =
                 case types_equal(DbCol#kura_column.type, DesCol#kura_column.type) of
@@ -1050,16 +1057,30 @@ is_nullable(#kura_column{nullable = Nullable}) -> Nullable.
 nullable_changed(DbCol, DesCol) ->
     is_nullable(DbCol) =/= is_nullable(DesCol).
 
-%% A primary key change is refused rather than generated. Dropping the old
-%% key fails while another table's foreign key depends on it, and only the
-%% author knows which of those constraints to move and in what order. Replay
-%% reads the hand-written ALTER TABLE ... DROP CONSTRAINT / ADD PRIMARY KEY
-%% that does it, so the refusal clears once that migration exists.
--spec assert_primary_key_kept(binary(), atom(), #kura_column{}, #kura_column{}) -> ok.
-assert_primary_key_kept(_, _, #kura_column{primary_key = PK}, #kura_column{primary_key = PK}) ->
-    ok;
-assert_primary_key_kept(Table, Name, _DbCol, #kura_column{primary_key = PK}) ->
-    error({kura_schema_diff, {primary_key_changed, Table, Name, PK}}).
+%% A primary key change is refused rather than generated, whether a column
+%% joins or leaves the key or a key column is added or dropped. Dropping the
+%% old key fails while another table's foreign key depends on it, adding a
+%% PRIMARY KEY column to a keyed table fails outright, and only the author
+%% knows which dependent constraints to move first. Replay reads the
+%% hand-written migration that does it, so the refusal clears once it exists.
+-spec assert_primary_key_kept(binary(), [#kura_column{}], [#kura_column{}], #{
+    binary() => binary()
+}) -> ok.
+assert_primary_key_kept(Table, DbCols, DesiredCols, PkNames) ->
+    DbKey = key_columns(DbCols),
+    DesiredKey = key_columns(DesiredCols),
+    case (DbKey -- DesiredKey) ++ (DesiredKey -- DbKey) of
+        [] ->
+            ok;
+        [Col | _] ->
+            Name = maps:get(Table, PkNames, default_pk_name(Table)),
+            Joins = lists:member(Col, DesiredKey),
+            error({kura_schema_diff, {primary_key_changed, Table, Col, Joins, Name}})
+    end.
+
+-spec key_columns([#kura_column{}]) -> [atom()].
+key_columns(Cols) ->
+    lists:sort([C#kura_column.name || C <- Cols, C#kura_column.primary_key]).
 
 col_map(Cols) ->
     maps:from_list([{C#kura_column.name, C} || C <- Cols]).
@@ -1164,10 +1185,25 @@ existing_columns(Table, Cols, State) ->
         false -> error
     end.
 
-%% PostgreSQL's own name for an unnamed primary key constraint.
 -spec pk_name(binary(), db_state()) -> binary().
 pk_name(Table, State) ->
-    maps:get(Table, maps:get(pk_names, State, #{}), <<Table/binary, "_pkey">>).
+    maps:get(Table, maps:get(pk_names, State, #{}), default_pk_name(Table)).
+
+%% PostgreSQL's own name for an unnamed primary key constraint. An identifier
+%% holds at most 63 bytes, so the table part is cut to fit the suffix, and
+%% never inside a UTF-8 character.
+-spec default_pk_name(binary()) -> binary().
+default_pk_name(Table) ->
+    <<(clip(Table, 58))/binary, "_pkey">>.
+
+-spec clip(binary(), non_neg_integer()) -> binary().
+clip(Bin, Max) when byte_size(Bin) =< Max ->
+    Bin;
+clip(Bin, Max) ->
+    case binary:at(Bin, Max) of
+        Continuation when Continuation band 16#C0 =:= 16#80 -> clip(Bin, Max - 1);
+        _ -> binary:part(Bin, 0, Max)
+    end.
 
 -spec add_pk(binary(), [atom()], binary(), db_state()) -> db_state().
 add_pk(Table, Key, Name, #{columns := ColState} = State) ->

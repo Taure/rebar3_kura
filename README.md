@@ -110,19 +110,35 @@ all their foreign keys inline, so they need a hand-written migration.
 
 ### Primary key changes
 
-A field gaining or losing `primary_key = true` on a table that already exists
-is refused, not generated: the run aborts with `primary_key_changed`, naming
-the table and the column. Dropping the old key fails while another table's
-foreign key depends on it, and only the author knows which of those to move
-first, so the change needs a hand-written migration. Replay reads the two
-statements it is usually made of, each in its own `execute`:
+A change to the set of primary key columns of a table that already exists is
+refused, not generated: a field gaining or losing `primary_key = true`, a new
+field declared as a key, or a key field removed. The run aborts with
+`primary_key_changed`, naming the table, the column and the constraint the
+key lives under. Dropping the old key fails while another table's foreign key
+depends on it, and only the author knows which of those to move first, so the
+change needs a hand-written migration. Replay reads either way of writing it,
+and the refusal clears once that migration exists.
 
-- `ALTER TABLE t DROP CONSTRAINT name`, for the table's primary key under
-  `<table>_pkey` or the name a replayed `ADD CONSTRAINT` gave it. The key's
-  columns stay `NOT NULL`, as they do in PostgreSQL.
+On PostgreSQL, two statements, each in its own `execute`:
+
+- `ALTER TABLE t DROP CONSTRAINT name`, for the table's primary key under the
+  name PostgreSQL gave it (`<table>_pkey`, with the table cut to fit 63
+  bytes) or the name a replayed `ADD CONSTRAINT` gave it. The key's columns
+  stay `NOT NULL`, as they do in PostgreSQL.
 - `ALTER TABLE t ADD [CONSTRAINT name] PRIMARY KEY (c, ...)`
 
-Once that migration exists the refusal clears.
+SQLite cannot alter a primary key, so rebuild the table from structured
+operations, which replay reads on any backend:
+
+```erlang
+up() ->
+    [{create_table, ~"t_rebuild", Cols, [{primary_key, [a, b]}]},
+     {execute, ~"INSERT INTO t_rebuild (a, b) SELECT a, b FROM t"},
+     {drop_table, ~"t"},
+     {create_table, ~"t", Cols, [{primary_key, [a, b]}]},
+     {execute, ~"INSERT INTO t (a, b) SELECT a, b FROM t_rebuild"},
+     {drop_table, ~"t_rebuild"}].
+```
 
 ### Foreign keys from associations
 

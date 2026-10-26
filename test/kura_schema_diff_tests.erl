@@ -1971,7 +1971,7 @@ diff_refuses_rather_than_drop_not_null_from_a_demoted_primary_key_test() ->
     Db = #{~"t" => [#kura_column{name = id, type = id, primary_key = true}]},
     Desired = #{~"t" => [#kura_column{name = id, type = id}]},
     ?assertError(
-        {kura_schema_diff, {primary_key_changed, ~"t", id, false}},
+        {kura_schema_diff, {primary_key_changed, ~"t", id, false, ~"t_pkey"}},
         kura_schema_diff:diff(Db, Desired)
     ).
 
@@ -2335,31 +2335,106 @@ keyed_on(Key) ->
 
 diff_refuses_a_column_leaving_the_primary_key_test() ->
     ?assertError(
-        {kura_schema_diff, {primary_key_changed, ~"t", id, false}},
+        {kura_schema_diff, {primary_key_changed, ~"t", id, false, ~"t_pkey"}},
         kura_schema_diff:diff(#{~"t" => keyed_on(id)}, #{~"t" => keyed_on(none)})
     ).
 
 diff_refuses_a_column_joining_the_primary_key_test() ->
     ?assertError(
-        {kura_schema_diff, {primary_key_changed, ~"t", uuid, true}},
+        {kura_schema_diff, {primary_key_changed, ~"t", uuid, true, ~"t_pkey"}},
         kura_schema_diff:diff(#{~"t" => keyed_on(none)}, #{~"t" => keyed_on(uuid)})
     ).
 
 diff_refuses_a_moved_primary_key_test() ->
     ?assertError(
-        {kura_schema_diff, {primary_key_changed, ~"t", id, false}},
+        {kura_schema_diff, {primary_key_changed, ~"t", id, false, ~"t_pkey"}},
         kura_schema_diff:diff(#{~"t" => keyed_on(id)}, #{~"t" => keyed_on(uuid)})
     ).
 
 format_error_primary_key_changed_test() ->
     Joined = lists:flatten(
-        kura_schema_diff:format_error({primary_key_changed, ~"t", uuid, true})
+        kura_schema_diff:format_error({primary_key_changed, ~"t", uuid, true, ~"t_key"})
     ),
     ?assertNotEqual(nomatch, string:find(Joined, "table \"t\"")),
     ?assertNotEqual(nomatch, string:find(Joined, "adds column 'uuid' to the primary key")),
     ?assertNotEqual(nomatch, string:find(Joined, "hand-written migration")),
-    Left = lists:flatten(kura_schema_diff:format_error({primary_key_changed, ~"t", id, false})),
+    ?assertNotEqual(nomatch, string:find(Joined, "DROP CONSTRAINT \\\"t_key\\\"")),
+    ?assertNotEqual(nomatch, string:find(Joined, "SQLite")),
+    Left = lists:flatten(
+        kura_schema_diff:format_error({primary_key_changed, ~"t", id, false, ~"t_pkey"})
+    ),
     ?assertNotEqual(nomatch, string:find(Left, "takes column 'id' out of the primary key")).
+
+diff_refuses_a_new_key_column_on_an_existing_table_test() ->
+    Db = #{~"t" => [#kura_column{name = a, type = string}]},
+    Desired = #{
+        ~"t" => [
+            #kura_column{name = a, type = string},
+            #kura_column{name = id, type = id, primary_key = true}
+        ]
+    },
+    ?assertError(
+        {kura_schema_diff, {primary_key_changed, ~"t", id, true, ~"t_pkey"}},
+        kura_schema_diff:diff(Db, Desired)
+    ).
+
+diff_refuses_dropping_a_key_column_test() ->
+    Db = #{~"t" => keyed_on(id)},
+    Desired = #{~"t" => [#kura_column{name = uuid, type = uuid, nullable = false}]},
+    ?assertError(
+        {kura_schema_diff, {primary_key_changed, ~"t", id, false, ~"t_pkey"}},
+        kura_schema_diff:diff(Db, Desired)
+    ).
+
+diff_refusal_names_a_recorded_key_constraint_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = id, type = id, nullable = false}]},
+        {execute, ~"ALTER TABLE t ADD CONSTRAINT t_key PRIMARY KEY (id)"}
+    ]),
+    ?assertError(
+        {kura_schema_diff, {primary_key_changed, ~"t", id, false, ~"t_key"}},
+        kura_schema_diff:diff(State, #{~"t" => [#kura_column{name = id, type = id}]})
+    ).
+
+diff_refusal_names_the_truncated_key_constraint_test() ->
+    Long = binary:copy(~"a", 60),
+    Db = #{Long => [#kura_column{name = id, type = id, primary_key = true}]},
+    Expected = <<(binary:copy(~"a", 58))/binary, "_pkey">>,
+    ?assertError(
+        {kura_schema_diff, {primary_key_changed, Long, id, false, Expected}},
+        kura_schema_diff:diff(Db, #{Long => [#kura_column{name = id, type = id}]})
+    ).
+
+replay_drops_a_key_under_its_truncated_name_test() ->
+    Table = <<(binary:copy(~"a", 57))/binary, "é"/utf8, "b">>,
+    Constraint = <<(binary:copy(~"a", 57))/binary, "_pkey">>,
+    State = replay([
+        {create_table, Table, [#kura_column{name = id, type = id, primary_key = true}]},
+        {execute,
+            <<"ALTER TABLE \"", Table/binary, "\" DROP CONSTRAINT \"", Constraint/binary, "\"">>}
+    ]),
+    ?assertEqual([], kura_schema_diff:unreplayed_executes(State)),
+    ?assertEqual(false, (col(State, Table, id))#kura_column.primary_key).
+
+replay_table_rebuild_changes_the_key_on_any_backend_test() ->
+    Cols = [#kura_column{name = a, type = integer}, #kura_column{name = b, type = integer}],
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = id, type = id, primary_key = true} | Cols]},
+        {create_table, ~"t_rebuild", Cols, [{primary_key, [a, b]}]},
+        {execute, ~"INSERT INTO t_rebuild (a, b) SELECT a, b FROM t"},
+        {drop_table, ~"t"},
+        {create_table, ~"t", Cols, [{primary_key, [a, b]}]},
+        {execute, ~"INSERT INTO t (a, b) SELECT a, b FROM t_rebuild"},
+        {drop_table, ~"t_rebuild"}
+    ]),
+    Desired = #{
+        ~"t" => [
+            #kura_column{name = a, type = integer, primary_key = true},
+            #kura_column{name = b, type = integer, primary_key = true}
+        ]
+    },
+    ?assertEqual([], kura_schema_diff:unreplayed_executes(State)),
+    ?assertEqual({[], []}, kura_schema_diff:diff(State, Desired)).
 
 replay_hand_written_primary_key_move_test() ->
     State = replay([
