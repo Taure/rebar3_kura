@@ -189,6 +189,14 @@ default that is an expression, a `DO` block, several statements in one string,
 ...) is not replayed. `compile` and `check` print a warning per statement, so
 a drift report that follows one can be read with that in mind.
 
+### Table constraints in `create_table/4`
+
+A `{create_table, Name, Columns, Constraints}` is replayed like the
+three-element form. A `{primary_key, Cols}` constraint marks those columns as
+the primary key. A `{unique, Cols}` or `{check, Expr}` constraint is not
+modelled, so `compile` and `check` print it with the same warning as an
+unreplayed `execute`.
+
 ### Enum handling
 
 Enum fields (`{enum, [atom()]}`) map to `VARCHAR(255)`. Changing the enum value list doesn't trigger a migration since the underlying column type is unchanged.

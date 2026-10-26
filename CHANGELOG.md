@@ -5,6 +5,7 @@
 ### Fixed
 
 - Generated `down/0` undoes table, column and constraint ops in the reverse of the order `up/0` ran them, and drops new tables that reference each other dependents first, so a rollback no longer drops a table a new column or foreign key still references (#41)
+- Replay reads `{create_table, Name, Columns, Constraints}`: the table was missing from the replayed state, so the next run generated a second `create_table` for it. A `primary_key` constraint marks its columns; `unique` and `check` constraints are reported like an unreplayed `execute` (#52)
 
 ## [0.6.0] - 2026-02-27
 

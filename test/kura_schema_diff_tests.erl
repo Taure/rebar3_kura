@@ -2245,3 +2245,59 @@ diff_down_keeps_mutually_referencing_new_tables_test() ->
     ?assertMatch(
         {_, [{drop_table, ~"a"}, {drop_table, ~"b"}]}, kura_schema_diff:diff(#{}, Desired)
     ).
+
+%%====================================================================
+%% Replay of create_table/4 (Taure/rebar3_kura#52)
+%%====================================================================
+
+replay_create_table_with_constraints_test() ->
+    State = replay([
+        {create_table, ~"t",
+            [#kura_column{name = id, type = id}, #kura_column{name = a, type = string}], [
+                {primary_key, [id]}
+            ]}
+    ]),
+    Desired = #{
+        ~"t" => [
+            #kura_column{name = id, type = id, primary_key = true},
+            #kura_column{name = a, type = string}
+        ]
+    },
+    ?assertEqual({[], []}, kura_schema_diff:diff(State, Desired)),
+    ?assertEqual([], kura_schema_diff:unreplayed_executes(State)).
+
+replay_create_table_composite_primary_key_test() ->
+    State = replay([
+        {create_table, ~"t",
+            [
+                #kura_column{name = a, type = integer},
+                #kura_column{name = b, type = integer},
+                #kura_column{name = c, type = string}
+            ],
+            [{primary_key, [a, b]}]}
+    ]),
+    ?assertEqual(
+        [true, true, false],
+        [C#kura_column.primary_key || C <- maps:get(~"t", cols(State))]
+    ).
+
+replay_create_table_notes_constraints_it_cannot_model_test() ->
+    State = replay([
+        {create_table, ~"t",
+            [#kura_column{name = a, type = string}, #kura_column{name = b, type = integer}], [
+                {unique, [a, b]}, {check, ~"b > 0"}
+            ]}
+    ]),
+    ?assertEqual(
+        [
+            ~"CREATE TABLE \"t\" (... UNIQUE (\"a\", \"b\"))",
+            ~"CREATE TABLE \"t\" (... CHECK (b > 0))"
+        ],
+        kura_schema_diff:unreplayed_executes(State)
+    ),
+    ?assertEqual([a, b], [C#kura_column.name || C <- maps:get(~"t", cols(State))]).
+
+replay_create_table_without_constraints_test() ->
+    State = replay([{create_table, ~"t", [#kura_column{name = a, type = string}], []}]),
+    ?assertEqual(#{~"t" => [#kura_column{name = a, type = string}]}, cols(State)),
+    ?assertEqual([], kura_schema_diff:unreplayed_executes(State)).

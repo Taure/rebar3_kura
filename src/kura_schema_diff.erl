@@ -50,6 +50,7 @@
 }.
 -type operation() ::
     {create_table, binary(), [#kura_column{}]}
+    | {create_table, binary(), [#kura_column{}], [kura_migration:table_constraint()]}
     | {drop_table, binary()}
     | {alter_table, binary(), [alter_op()]}
     | {create_index, binary(), [atom()], map()}
@@ -122,7 +123,8 @@ unsupported_schemas(State) ->
 -doc """
 `execute` statements in the migration history that name a known table but
 match no shape replay understands, so drift reported on that table may be
-false. See the README for the shapes it does understand.
+false. See the README for the shapes it does understand. A `create_table/4`
+unique or check constraint is listed too, rendered as the clause it adds.
 """.
 -spec unreplayed_executes(db_state()) -> [binary()].
 unreplayed_executes(State) ->
@@ -484,6 +486,10 @@ apply_ops([], State) ->
     State;
 apply_ops([{create_table, Name, Cols} | Rest], #{columns := ColState} = State) ->
     apply_ops(Rest, State#{columns => ColState#{Name => Cols}});
+apply_ops([{create_table, Name, Cols, Constraints} | Rest], State) ->
+    Keyed = with_primary_key(Cols, lists:append([Key || {primary_key, Key} <- Constraints])),
+    State1 = apply_ops([{create_table, Name, Keyed}], State),
+    apply_ops(Rest, note_constraints(Name, Constraints, State1));
 apply_ops([{drop_table, Name} | Rest], #{columns := ColState, indexes := IdxState} = State) ->
     State1 = State#{
         columns => maps:remove(Name, ColState),
@@ -523,6 +529,39 @@ apply_ops([{execute, SQL} | Rest], State) ->
     apply_ops(Rest, replay_execute(SQL, State));
 apply_ops([_Other | Rest], State) ->
     apply_ops(Rest, State).
+
+-spec with_primary_key([#kura_column{}], [atom()]) -> [#kura_column{}].
+with_primary_key(Cols, Key) ->
+    [
+        case lists:member(C#kura_column.name, Key) of
+            true -> C#kura_column{primary_key = true};
+            false -> C
+        end
+     || C <- Cols
+    ].
+
+%% A unique constraint is an index replay does not record, and a check is
+%% nothing replay records, so both are reported the way an unread execute is.
+-spec note_constraints(binary(), [kura_migration:table_constraint()], db_state()) -> db_state().
+note_constraints(Table, Constraints, State) ->
+    Noted = [
+        iolist_to_binary([~"CREATE TABLE ", quote(Table), ~" (... ", Clause, ~")"])
+     || C <- Constraints,
+        {unmodelled, Clause} <- [constraint_clause(C)]
+    ],
+    State#{unreplayed => maps:get(unreplayed, State, []) ++ Noted}.
+
+-spec constraint_clause(kura_migration:table_constraint()) -> modelled | {unmodelled, iodata()}.
+constraint_clause({primary_key, _Cols}) ->
+    modelled;
+constraint_clause({unique, Cols}) ->
+    {unmodelled, [~"UNIQUE (", quoted_columns(Cols), ~")"]};
+constraint_clause({check, Expr}) ->
+    {unmodelled, [~"CHECK (", Expr, ~")"]}.
+
+-spec quoted_columns([atom()]) -> iodata().
+quoted_columns(Cols) ->
+    lists:join(~", ", [quote(atom_to_binary(C)) || C <- Cols]).
 
 %% Convert legacy flat map format to structured format
 -spec ensure_structured(map()) -> db_state().

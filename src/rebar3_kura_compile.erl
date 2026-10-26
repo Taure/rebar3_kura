@@ -134,7 +134,7 @@ report_unsupported([{_Mod, Reason} | Rest]) ->
 report_unreplayed(Statements) ->
     _ = [
         rebar_api:warn(
-            "kura: migration history has an execute replay cannot read, so drift "
+            "kura: migration history has a statement replay cannot read, so drift "
             "reported on the table it names may be false: ~ts",
             [SQL]
         )
