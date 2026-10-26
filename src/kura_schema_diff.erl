@@ -32,7 +32,15 @@
     ?IDENT,
     "\\s*\\)(.*)$"
 >>).
--define(DROP_FK_RE,
+-define(ADD_PK_RE, <<
+    "(?is)^ALTER\\s+TABLE\\s+",
+    ?IDENT,
+    "\\s+ADD\\s+(?:CONSTRAINT\\s+",
+    ?IDENT,
+    "\\s+)?PRIMARY\\s+KEY\\s*\\((.+)\\)$"
+>>).
+-define(IDENT_LIST_RE, <<"(?s)^\\s*", ?IDENT, "\\s*(?:,(.+))?$">>).
+-define(DROP_CONSTRAINT_RE,
     <<"(?is)^ALTER\\s+TABLE\\s+", ?IDENT, "\\s+DROP\\s+CONSTRAINT\\s+", ?IDENT, "$">>
 ).
 
@@ -46,10 +54,13 @@
     unsupported => [{module(), term()}],
     fk_names => #{fk_key() => binary()},
     fk_unowned => #{fk_key() => true},
+    pk_names => #{binary() => binary()},
+    keys => #{binary() => [atom()]},
     unreplayed => [binary()]
 }.
 -type operation() ::
     {create_table, binary(), [#kura_column{}]}
+    | {create_table, binary(), [#kura_column{}], [kura_migration:table_constraint()]}
     | {drop_table, binary()}
     | {alter_table, binary(), [alter_op()]}
     | {create_index, binary(), [atom()], map()}
@@ -78,7 +89,14 @@ build_db_state(MigModules) ->
             Ops = Mod:up(),
             apply_ops(Ops, Acc)
         end,
-        #{columns => #{}, indexes => #{}, fk_names => #{}, fk_unowned => #{}, unreplayed => []},
+        #{
+            columns => #{},
+            indexes => #{},
+            fk_names => #{},
+            fk_unowned => #{},
+            pk_names => #{},
+            unreplayed => []
+        },
         Sorted
     ).
 
@@ -87,7 +105,7 @@ build_db_state(MigModules) ->
 build_desired_state(SchemaModules) ->
     lists:foldl(
         fun desired_state_for/2,
-        #{columns => #{}, indexes => #{}, unsupported => []},
+        #{columns => #{}, indexes => #{}, keys => #{}, unsupported => []},
         SchemaModules
     ).
 
@@ -95,21 +113,47 @@ build_desired_state(SchemaModules) ->
 %% aborting the run: one composite foreign key must not stop every other table
 %% in the application being checked for drift. Everything else is a mistake the
 %% author can fix, so it still aborts.
-desired_state_for(Mod, #{columns := ColAcc, indexes := IdxAcc, unsupported := Unsup} = Acc) ->
+desired_state_for(
+    Mod, #{columns := ColAcc, indexes := IdxAcc, keys := KeyAcc, unsupported := Unsup} = Acc
+) ->
     try
         Table = Mod:table(),
         Fields = Mod:fields(),
-        Columns = [field_to_column(F) || F <- Fields, F#kura_field.virtual =/= true],
+        Key = schema_key(Mod, Fields),
+        Columns = [
+            with_key(field_to_column(F), Key)
+         || F <- Fields, F#kura_field.virtual =/= true
+        ],
         Enriched = enrich_with_associations(Mod, Columns),
         Indexes = extract_indexes(Mod),
         ok = check_index_columns(Mod, Indexes, Enriched),
-        Acc#{columns => ColAcc#{Table => Enriched}, indexes => IdxAcc#{Table => Indexes}}
+        Acc#{
+            columns => ColAcc#{Table => Enriched},
+            indexes => IdxAcc#{Table => Indexes},
+            keys => KeyAcc#{Table => Key}
+        }
     catch
         error:{kura_schema_diff, {composite_assoc_unsupported, _, _} = Reason} ->
             Acc#{unsupported => Unsup ++ [{Mod, Reason}]};
         error:{kura_schema_diff, {composite_target_key, _, _, _, _} = Reason} ->
             Acc#{unsupported => Unsup ++ [{Mod, Reason}]}
     end.
+
+-spec schema_key(module(), [#kura_field{}]) -> [atom()].
+schema_key(Mod, Fields) ->
+    Names = declared_key(Mod),
+    [key_column(Mod, Name, Fields) || Name <- Names].
+
+-spec key_column(module(), atom(), [#kura_field{}]) -> atom().
+key_column(Mod, Name, Fields) ->
+    case [F || F <- Fields, F#kura_field.name =:= Name] of
+        [Field | _] -> (field_to_column(Field))#kura_column.name;
+        [] -> error({kura_schema_diff, {key_unknown_field, Mod, Name}})
+    end.
+
+-spec with_key(#kura_column{}, [atom()]) -> #kura_column{}.
+with_key(Col, Key) ->
+    Col#kura_column{primary_key = lists:member(Col#kura_column.name, Key)}.
 
 -doc """
 Schemas excluded from a desired state because the generator cannot express
@@ -122,7 +166,8 @@ unsupported_schemas(State) ->
 -doc """
 `execute` statements in the migration history that name a known table but
 match no shape replay understands, so drift reported on that table may be
-false. See the README for the shapes it does understand.
+false. See the README for the shapes it does understand. A `create_table/4`
+unique or check constraint is listed too, rendered as the clause it adds.
 """.
 -spec unreplayed_executes(db_state()) -> [binary()].
 unreplayed_executes(State) ->
@@ -158,17 +203,17 @@ diff(DbState, DesiredState) ->
     DbIdx = maps:get(indexes, ensure_structured(DbState), #{}),
     DesiredIdx = maps:get(indexes, ensure_structured(DesiredState), #{}),
     FkMeta = {maps:get(fk_names, DbState, #{}), maps:get(fk_unowned, DbState, #{})},
+    PkNames = maps:get(pk_names, DbState, #{}),
+    DesiredKeys = maps:get(keys, DesiredState, #{}),
 
     %% New tables: in desired but not in DB
-    NewTables = maps:keys(DesiredCols) -- maps:keys(DbCols),
-    {CreateUp, CreateDown} = lists:foldl(
-        fun(Table, {UpAcc, DownAcc}) ->
-            Cols = maps:get(Table, DesiredCols),
-            {UpAcc ++ [{create_table, Table, Cols}], DownAcc ++ [{drop_table, Table}]}
-        end,
-        {[], []},
-        lists:sort(NewTables)
-    ),
+    NewTables = lists:sort(maps:keys(DesiredCols) -- maps:keys(DbCols)),
+    CreateOrder = create_order(NewTables, DesiredCols),
+    CreateUp = [
+        create_table(Table, maps:get(Table, DesiredCols), maps:get(Table, DesiredKeys, undefined))
+     || Table <- CreateOrder
+    ],
+    CreateDown = [{drop_table, Table} || Table <- lists:reverse(CreateOrder)],
 
     %% Existing tables: diff columns
     ExistingTables = maps:keys(DesiredCols) -- NewTables,
@@ -176,6 +221,7 @@ diff(DbState, DesiredState) ->
         fun(Table, {AUpAcc, ADownAcc, EUpAcc, EDownAcc}) ->
             DbTableCols = maps:get(Table, DbCols, []),
             DesiredTableCols = maps:get(Table, DesiredCols),
+            ok = assert_primary_key_kept(Table, DbTableCols, DesiredTableCols, PkNames),
             case diff_columns(Table, DbTableCols, DesiredTableCols, FkMeta) of
                 {[], [], [], []} ->
                     {AUpAcc, ADownAcc, EUpAcc, EDownAcc};
@@ -188,9 +234,9 @@ diff(DbState, DesiredState) ->
                     ADown2 =
                         case ColDown of
                             [] -> ADownAcc;
-                            _ -> ADownAcc ++ [{alter_table, Table, ColDown}]
+                            _ -> [{alter_table, Table, ColDown} | ADownAcc]
                         end,
-                    {AUp2, ADown2, EUpAcc ++ EU, EDownAcc ++ ED}
+                    {AUp2, ADown2, EUpAcc ++ EU, ED ++ EDownAcc}
             end
         end,
         {[], [], [], []},
@@ -208,17 +254,83 @@ diff(DbState, DesiredState) ->
     ],
     IdxUp = lists:append([IU || {{IU, _}, _} <- IdxOps]),
     %% down/0 drops a new table, and its indexes with it.
-    IdxDown = lists:append([ID || {{_, ID}, false} <- IdxOps]),
+    IdxDown = lists:reverse(lists:append([ID || {{_, ID}, false} <- IdxOps])),
     {IdxDropUp, IdxCreateUp} = lists:partition(fun is_drop_index/1, IdxUp),
     {IdxDropDown, IdxCreateDown} = lists:partition(fun is_drop_index/1, IdxDown),
 
     %% Index drops go before the column ops and creates after them. Postgres
     %% drops an index along with a column it covers, so a later drop_index
     %% raises 42704; SQLite refuses to drop an indexed column at all.
+    %%
+    %% down/0 undoes each step of up/0 in the reverse order, across groups,
+    %% tables and columns: a new table cannot be dropped while a column or
+    %% foreign key added in the same migration still references it. A
+    %% foreign key change is one step, so its undo still drops before it adds.
     {
         IdxDropUp ++ CreateUp ++ AlterUp ++ ExecUp ++ IdxCreateUp,
-        IdxDropDown ++ CreateDown ++ AlterDown ++ ExecDown ++ IdxCreateDown
+        IdxDropDown ++ ExecDown ++ AlterDown ++ CreateDown ++ IdxCreateDown
     }.
+
+%% kura writes PRIMARY KEY inline on each column that has primary_key set,
+%% which for a composite key declares the key twice and fails. A composite
+%% key is a table constraint instead, in the order key/0 gives or else the
+%% order of the fields.
+%% Its columns are written NOT NULL: SQLite, unlike PostgreSQL, lets a
+%% composite key column hold NULL, and then (1, NULL) is not unique.
+-spec create_table(binary(), [#kura_column{}], [atom()] | undefined) -> operation().
+create_table(Table, Cols, undefined) ->
+    create_table(Table, Cols, key_columns(Cols));
+create_table(Table, Cols, Key) ->
+    case Key of
+        [_, _ | _] = Key ->
+            {create_table, Table, [unkeyed_not_null(C) || C <- Cols], [{primary_key, Key}]};
+        _ ->
+            {create_table, Table, Cols}
+    end.
+
+-spec unkeyed_not_null(#kura_column{}) -> #kura_column{}.
+unkeyed_not_null(#kura_column{primary_key = true} = C) ->
+    C#kura_column{primary_key = false, nullable = false};
+unkeyed_not_null(C) ->
+    C.
+
+%% CREATE TABLE writes REFERENCES inline, so a new table is created once
+%% every other new table it references exists. Tables that reference each
+%% other have no such order and are refused: the cycle needs a foreign key
+%% added after both tables exist, which is the author's call.
+-spec create_order([binary()], col_state()) -> [binary()].
+create_order([], _Cols) ->
+    [];
+create_order(Tables, Cols) ->
+    case [T || T <- Tables, refs(T, Tables, Cols) =:= []] of
+        [] -> error({kura_schema_diff, {reference_cycle, in_cycle(Tables, Cols)}});
+        Ready -> Ready ++ create_order(Tables -- Ready, Cols)
+    end.
+
+%% A table can also sit between cycles, reached from one and reaching
+%% another, without being in either.
+-spec in_cycle([binary()], col_state()) -> [binary()].
+in_cycle(Tables, Cols) ->
+    [T || T <- Tables, lists:member(T, reachable(refs(T, Tables, Cols), [], Tables, Cols))].
+
+-spec reachable([binary()], [binary()], [binary()], col_state()) -> [binary()].
+reachable([], Seen, _Tables, _Cols) ->
+    Seen;
+reachable([T | Rest], Seen, Tables, Cols) ->
+    case lists:member(T, Seen) of
+        true -> reachable(Rest, Seen, Tables, Cols);
+        false -> reachable(refs(T, Tables, Cols) ++ Rest, [T | Seen], Tables, Cols)
+    end.
+
+%% A table referencing itself is created in one statement, so that is no edge.
+-spec refs(binary(), [binary()], col_state()) -> [binary()].
+refs(Table, Tables, Cols) ->
+    lists:usort([
+        Ref
+     || #kura_column{references = {Ref, _}} <- maps:get(Table, Cols),
+        Ref =/= Table,
+        lists:member(Ref, Tables)
+    ]).
 
 %% Convert a kura_field to a kura_column (skipping virtual fields)
 -spec field_to_column(#kura_field{}) -> #kura_column{}.
@@ -292,15 +404,19 @@ target_key(Mod, Name, Assoc, Target) ->
 
 declared_target_key(Assoc, Target) ->
     case kura_schema:assoc_target_key(Assoc) of
-        undefined -> target_schema_key(Target);
+        undefined -> declared_key(Target);
         Cols -> Cols
     end.
 
-target_schema_key(Target) ->
+%% kura_schema caches a key for the life of the VM, and a schema reloaded
+%% in a rebar3 shell would otherwise keep the key its old code declared.
+-spec declared_key(module()) -> [atom()].
+declared_key(Mod) ->
+    ok = kura_schema:forget(Mod),
     try
-        kura_schema:key(Target)
+        kura_schema:key(Mod)
     catch
-        error:{no_primary_key, Target} -> []
+        error:{no_primary_key, Mod} -> []
     end.
 
 enrich_fk_column(Mod, Assoc, FK, Refs, OnDelete, Columns) ->
@@ -415,6 +531,36 @@ format_error({fk_not_owned, Table, Col}) ->
         "hand-written migration",
         [Table, Col]
     );
+format_error({primary_key_changed, Table, Col, Joins, Constraint}) when
+    is_binary(Table), is_atom(Col), is_boolean(Joins), is_binary(Constraint)
+->
+    AlterTable = <<"ALTER TABLE ", (quote(Table))/binary>>,
+    io_lib:format(
+        "table \"~s\": the schema ~s, but the generator does not change a "
+        "primary key: dropping the old one fails while a foreign key depends "
+        "on it. Write this change as a hand-written migration, which replay "
+        "reads. On PostgreSQL: {execute, ~s} then {execute, ~s}. "
+        "On SQLite, which cannot alter a key, rebuild the table: create_table/4 "
+        "a copy with {primary_key, [...]}, copy the rows with an execute, "
+        "drop_table the original, create_table/4 it again and copy the rows "
+        "back, then drop_table the copy",
+        [
+            Table,
+            key_change(Joins, Col),
+            sigil(<<AlterTable/binary, " DROP CONSTRAINT ", (quote(Constraint))/binary>>),
+            sigil(<<AlterTable/binary, " ADD PRIMARY KEY (...)">>)
+        ]
+    );
+format_error({key_unknown_field, Mod, Name}) ->
+    io_lib:format("~s: key/0 names '~s', which is not a field of ~s", [Mod, Name, Mod]);
+format_error({reference_cycle, Tables}) when is_list(Tables) ->
+    io_lib:format(
+        "new tables ~s reference each other, so no order of CREATE TABLE "
+        "can declare all their foreign keys inline. Create them in a "
+        "hand-written migration that adds one of the foreign keys after both "
+        "tables exist",
+        [lists:join(", ", [[$", T, $"] || T <- Tables, is_binary(T)])]
+    );
 format_error({assoc_key_not_a_field, Mod, Name, FK}) ->
     io_lib:format(
         "~s: association '~s' names foreign key '~s', which is not a field on ~s",
@@ -456,6 +602,16 @@ format_error({on_delete_not_owned, Mod, Name, Type}) ->
 format_error(Reason) ->
     io_lib:format("~p", [Reason]).
 
+%% Escaped the way the migration renderer escapes, so the snippet pastes as
+%% Erlang whatever the table and constraint are called.
+-spec sigil(binary()) -> iodata().
+sigil(Bin) ->
+    [$~, $", binary:replace(Bin, [<<$\\>>, <<$">>], <<$\\>>, [global, {insert_replaced, 1}]), $"].
+
+-spec key_change(boolean(), atom()) -> iolist().
+key_change(true, Col) -> io_lib:format("adds column '~s' to the primary key", [Col]);
+key_change(false, Col) -> io_lib:format("takes column '~s' out of the primary key", [Col]).
+
 format_atoms(Atoms) ->
     lists:join(", ", [atom_to_list(A) || A <- Atoms]).
 
@@ -465,10 +621,15 @@ apply_ops([], State) ->
     State;
 apply_ops([{create_table, Name, Cols} | Rest], #{columns := ColState} = State) ->
     apply_ops(Rest, State#{columns => ColState#{Name => Cols}});
+apply_ops([{create_table, Name, Cols, Constraints} | Rest], State) ->
+    Keyed = with_primary_key(Cols, lists:append([Key || {primary_key, Key} <- Constraints])),
+    State1 = apply_ops([{create_table, Name, Keyed}], State),
+    apply_ops(Rest, note_constraints(Name, Constraints, State1));
 apply_ops([{drop_table, Name} | Rest], #{columns := ColState, indexes := IdxState} = State) ->
     State1 = State#{
         columns => maps:remove(Name, ColState),
-        indexes => maps:remove(Name, IdxState)
+        indexes => maps:remove(Name, IdxState),
+        pk_names => maps:remove(Name, maps:get(pk_names, State, #{}))
     },
     apply_ops(Rest, forget_fk_meta(fun({T, _}) -> T =/= Name end, State1));
 apply_ops(
@@ -482,7 +643,8 @@ apply_ops(
             #{} -> IdxState
         end,
     State1 = alter_fk_meta(AlterOps, Name, Cols, State),
-    apply_ops(Rest, State1#{columns => ColState#{Name => NewCols}, indexes => NewIdxState});
+    NewColState = retarget_references(AlterOps, Name, ColState#{Name => NewCols}),
+    apply_ops(Rest, State1#{columns => NewColState, indexes => NewIdxState});
 apply_ops([{create_index, Table, Columns, Opts} | Rest], #{indexes := IdxState} = State) ->
     TableIdx = maps:get(Table, IdxState, []),
     Entry = {Columns, Opts},
@@ -504,6 +666,36 @@ apply_ops([{execute, SQL} | Rest], State) ->
     apply_ops(Rest, replay_execute(SQL, State));
 apply_ops([_Other | Rest], State) ->
     apply_ops(Rest, State).
+
+-spec with_primary_key([#kura_column{}], [atom()]) -> [#kura_column{}].
+with_primary_key(Cols, Key) ->
+    [
+        case lists:member(C#kura_column.name, Key) of
+            true -> C#kura_column{primary_key = true};
+            false -> C
+        end
+     || C <- Cols
+    ].
+
+%% A unique constraint is an index replay does not record, so a schema that
+%% declares the same unique index sees drift that is not there; one note per
+%% table names them all. A check constraint is nothing the diff compares, so
+%% it would only add a warning to every run.
+-spec note_constraints(binary(), [kura_migration:table_constraint()], db_state()) -> db_state().
+note_constraints(Table, Constraints, State) ->
+    case [[~"UNIQUE (", quoted_columns(Cols), ~")"] || {unique, Cols} <- Constraints] of
+        [] ->
+            State;
+        Clauses ->
+            Note = iolist_to_binary([
+                ~"CREATE TABLE ", quote(Table), ~" (... ", lists:join(~", ", Clauses), ~")"
+            ]),
+            State#{unreplayed => maps:get(unreplayed, State, []) ++ [Note]}
+    end.
+
+-spec quoted_columns([atom()]) -> iodata().
+quoted_columns(Cols) ->
+    lists:join(~", ", [quote(atom_to_binary(C)) || C <- Cols]).
 
 %% Convert legacy flat map format to structured format
 -spec ensure_structured(map()) -> db_state().
@@ -599,6 +791,24 @@ alter_fk_meta([{rename_column, Old, New} = Op | Rest], Table, Cols, State) ->
     alter_fk_meta(Rest, Table, apply_alter_ops([Op], Cols), State1);
 alter_fk_meta([Op | Rest], Table, Cols, State) ->
     alter_fk_meta(Rest, Table, apply_alter_ops([Op], Cols), State).
+
+%% Postgres keeps a foreign key pointing at a column through its rename, so
+%% every table's reference to the old name, the renamed table's own included,
+%% follows it.
+-spec retarget_references([alter_op()], binary(), col_state()) -> col_state().
+retarget_references([], _Table, ColState) ->
+    ColState;
+retarget_references([{rename_column, Old, New} | Rest], Table, ColState) ->
+    Retargeted = #{T => [retarget(C, Table, Old, New) || C <- Cols] || T := Cols <- ColState},
+    retarget_references(Rest, Table, Retargeted);
+retarget_references([_Op | Rest], Table, ColState) ->
+    retarget_references(Rest, Table, ColState).
+
+-spec retarget(#kura_column{}, binary(), atom(), atom()) -> #kura_column{}.
+retarget(#kura_column{references = {Table, Old}} = C, Table, Old, New) ->
+    C#kura_column{references = {Table, New}};
+retarget(C, _Table, _Old, _New) ->
+    C.
 
 forget_fk_meta(Keep, State) ->
     State#{
@@ -728,7 +938,7 @@ diff_columns(Table, DbCols, DesiredCols, FkMeta) ->
                     false ->
                         {
                             MU ++ [{modify_column, Name, DesCol#kura_column.type}],
-                            MD ++ [{modify_column, Name, DbCol#kura_column.type}]
+                            [{modify_column, Name, DbCol#kura_column.type} | MD]
                         }
                 end,
             ColBin = atom_to_binary(Name, utf8),
@@ -748,13 +958,13 @@ diff_columns(Table, DbCols, DesiredCols, FkMeta) ->
                                                 " DROP NOT NULL"
                                             >>}
                                         ],
-                                    ED ++
-                                        [
-                                            {execute, <<
-                                                (alter_column(Table, ColBin))/binary,
-                                                " SET NOT NULL"
-                                            >>}
-                                        ]
+                                    [
+                                        {execute, <<
+                                            (alter_column(Table, ColBin))/binary,
+                                            " SET NOT NULL"
+                                        >>}
+                                        | ED
+                                    ]
                                 };
                             false ->
                                 {
@@ -765,13 +975,13 @@ diff_columns(Table, DbCols, DesiredCols, FkMeta) ->
                                                 " SET NOT NULL"
                                             >>}
                                         ],
-                                    ED ++
-                                        [
-                                            {execute, <<
-                                                (alter_column(Table, ColBin))/binary,
-                                                " DROP NOT NULL"
-                                            >>}
-                                        ]
+                                    [
+                                        {execute, <<
+                                            (alter_column(Table, ColBin))/binary,
+                                            " DROP NOT NULL"
+                                        >>}
+                                        | ED
+                                    ]
                                 }
                         end
                 end,
@@ -783,17 +993,22 @@ diff_columns(Table, DbCols, DesiredCols, FkMeta) ->
                     false ->
                         UpDef = default_sql(Table, ColBin, DesCol#kura_column.default),
                         DownDef = default_sql(Table, ColBin, DbCol#kura_column.default),
-                        {EU2 ++ [{execute, UpDef}], ED2 ++ [{execute, DownDef}]}
+                        {EU2 ++ [{execute, UpDef}], [{execute, DownDef} | ED2]}
                 end,
             %% Foreign key changes
             {FkUp, FkDown} = fk_ops(Table, Name, DbCol, DesCol, FkMeta),
-            {MU2, MD2, EU3 ++ FkUp, ED3 ++ FkDown}
+            {MU2, MD2, EU3 ++ FkUp, FkDown ++ ED3}
         end,
         {[], [], [], []},
         lists:sort(Common)
     ),
 
-    {AddUp ++ DropUp ++ ModUp, AddDown ++ DropDown ++ ModDown, ExecUp, ExecDown}.
+    {
+        AddUp ++ DropUp ++ ModUp,
+        ModDown ++ lists:reverse(DropDown, lists:reverse(AddDown)),
+        ExecUp,
+        ExecDown
+    }.
 
 %% An association edited on a table that already exists reaches the diff as a
 %% changed `references`/`on_delete` on a column both sides already have. There
@@ -921,13 +1136,33 @@ types_equal(A, B) -> A =:= B.
 is_nullable(#kura_column{primary_key = true}) -> false;
 is_nullable(#kura_column{nullable = Nullable}) -> Nullable.
 
-%% The generator does not change primary keys, and Postgres refuses DROP NOT
-%% NULL on a column still in one, so a column gaining or losing its primary
-%% key is not a nullability change here.
-nullable_changed(#kura_column{primary_key = PK} = DbCol, #kura_column{primary_key = PK} = DesCol) ->
-    is_nullable(DbCol) =/= is_nullable(DesCol);
-nullable_changed(_DbCol, _DesCol) ->
-    false.
+nullable_changed(DbCol, DesCol) ->
+    is_nullable(DbCol) =/= is_nullable(DesCol).
+
+%% A primary key change is refused rather than generated, whether a column
+%% joins or leaves the key or a key column is added or dropped. Dropping the
+%% old key fails while another table's foreign key depends on it, adding a
+%% PRIMARY KEY column to a keyed table fails outright, and only the author
+%% knows which dependent constraints to move first. Replay reads the
+%% hand-written migration that does it, so the refusal clears once it exists.
+-spec assert_primary_key_kept(binary(), [#kura_column{}], [#kura_column{}], #{
+    binary() => binary()
+}) -> ok.
+assert_primary_key_kept(Table, DbCols, DesiredCols, PkNames) ->
+    DbKey = key_columns(DbCols),
+    DesiredKey = key_columns(DesiredCols),
+    case (DbKey -- DesiredKey) ++ (DesiredKey -- DbKey) of
+        [] ->
+            ok;
+        [Col | _] ->
+            Name = maps:get(Table, PkNames, default_pk_name(Table)),
+            Joins = lists:member(Col, DesiredKey),
+            error({kura_schema_diff, {primary_key_changed, Table, Col, Joins, Name}})
+    end.
+
+-spec key_columns([#kura_column{}]) -> [atom()].
+key_columns(Cols) ->
+    [C#kura_column.name || C <- Cols, C#kura_column.primary_key].
 
 col_map(Cols) ->
     maps:from_list([{C#kura_column.name, C} || C <- Cols]).
@@ -980,14 +1215,109 @@ replay_fk_add(Stmt, State) ->
                     nomatch
             end;
         nomatch ->
-            replay_fk_drop(Stmt, State)
+            replay_pk_add(Stmt, State)
     end.
 
-replay_fk_drop(Stmt, State) ->
-    case captures(Stmt, ?DROP_FK_RE, 4) of
-        {match, [TQ, TB, NQ, NB]} -> drop_fk(ident(TQ, TB), ident(NQ, NB), State);
+-spec replay_pk_add(binary(), db_state()) -> {ok, db_state()} | nomatch.
+replay_pk_add(Stmt, State) ->
+    case captures(Stmt, ?ADD_PK_RE, 5) of
+        {match, [TQ, TB, NQ, NB, ColList]} ->
+            Table = ident(TQ, TB),
+            case existing_columns(Table, ident_list(ColList), State) of
+                {ok, Cols} -> {ok, add_pk(Table, Cols, ident(NQ, NB), State)};
+                error -> nomatch
+            end;
+        nomatch ->
+            replay_constraint_drop(Stmt, State)
+    end.
+
+-spec replay_constraint_drop(binary(), db_state()) -> {ok, db_state()} | nomatch.
+replay_constraint_drop(Stmt, State) ->
+    case captures(Stmt, ?DROP_CONSTRAINT_RE, 4) of
+        {match, [TQ, TB, NQ, NB]} -> drop_constraint(ident(TQ, TB), ident(NQ, NB), State);
         nomatch -> nomatch
     end.
+
+-spec drop_constraint(binary(), binary(), db_state()) -> {ok, db_state()} | nomatch.
+drop_constraint(Table, Constraint, State) ->
+    case drop_fk(Table, Constraint, State) of
+        {ok, State1} -> {ok, State1};
+        nomatch -> drop_pk(Table, Constraint, State)
+    end.
+
+-spec ident_list(binary()) -> [binary()] | error.
+ident_list(Bin) ->
+    case captures(Bin, ?IDENT_LIST_RE, 3) of
+        {match, [Q, B, <<>>]} -> [ident(Q, B)];
+        {match, [Q, B, Rest]} -> more_idents(ident(Q, B), ident_list(Rest));
+        nomatch -> error
+    end.
+
+-spec more_idents(binary(), [binary()] | error) -> [binary()] | error.
+more_idents(_Ident, error) -> error;
+more_idents(Ident, Idents) -> [Ident | Idents].
+
+-spec existing_columns(binary(), [binary()] | error, db_state()) -> {ok, [atom()]} | error.
+existing_columns(_Table, error, _State) ->
+    error;
+existing_columns(Table, Cols, State) ->
+    Found = [Atom || Col <- Cols, {ok, Atom} <- [existing_column(Table, Col, State)]],
+    case length(Found) =:= length(Cols) of
+        true -> {ok, Found};
+        false -> error
+    end.
+
+-spec pk_name(binary(), db_state()) -> binary().
+pk_name(Table, State) ->
+    maps:get(Table, maps:get(pk_names, State, #{}), default_pk_name(Table)).
+
+%% PostgreSQL's own name for an unnamed primary key constraint. An identifier
+%% holds at most 63 bytes, so the table part is cut to fit the suffix, and
+%% never inside a UTF-8 character.
+-spec default_pk_name(binary()) -> binary().
+default_pk_name(Table) ->
+    <<(clip(Table, 58))/binary, "_pkey">>.
+
+-spec clip(binary(), non_neg_integer()) -> binary().
+clip(Bin, Max) when byte_size(Bin) =< Max ->
+    Bin;
+clip(_Bin, 0) ->
+    <<>>;
+clip(Bin, Max) ->
+    case binary:at(Bin, Max) of
+        Continuation when Continuation band 16#C0 =:= 16#80 -> clip(Bin, Max - 1);
+        _ -> binary:part(Bin, 0, Max)
+    end.
+
+-spec add_pk(binary(), [atom()], binary(), db_state()) -> db_state().
+add_pk(Table, Key, Name, #{columns := ColState} = State) ->
+    PkNames = maps:get(pk_names, State, #{}),
+    State1 =
+        case Name of
+            <<>> -> State#{pk_names => maps:remove(Table, PkNames)};
+            _ -> State#{pk_names => PkNames#{Table => Name}}
+        end,
+    State1#{columns => ColState#{Table => with_primary_key(maps:get(Table, ColState), Key)}}.
+
+%% The key's columns stay NOT NULL after the constraint goes.
+-spec drop_pk(binary(), binary(), db_state()) -> {ok, db_state()} | nomatch.
+drop_pk(Table, Constraint, #{columns := ColState} = State) ->
+    Cols = maps:get(Table, ColState, []),
+    Keyed = lists:keymember(true, #kura_column.primary_key, Cols),
+    case Keyed andalso pk_name(Table, State) =:= Constraint of
+        true ->
+            Unkeyed = [unkey(C) || C <- Cols],
+            PkNames = maps:remove(Table, maps:get(pk_names, State, #{})),
+            {ok, State#{columns => ColState#{Table => Unkeyed}, pk_names => PkNames}};
+        false ->
+            nomatch
+    end.
+
+-spec unkey(#kura_column{}) -> #kura_column{}.
+unkey(#kura_column{primary_key = true} = C) ->
+    C#kura_column{primary_key = false, nullable = false};
+unkey(C) ->
+    C.
 
 %% Every group is asked for by number: PCRE leaves unset trailing groups out
 %% of an all_but_first capture, and an identifier's unused form is unset.

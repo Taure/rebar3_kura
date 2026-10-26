@@ -19,6 +19,10 @@ incomplete diff) gets a red build instead of a silent landmine.
 
 -export([init/1, do/1, format_error/1]).
 
+-ifdef(TEST).
+-export([describe_op/1]).
+-endif.
+
 -define(PROVIDER, check).
 -define(NAMESPACE, kura).
 -define(DEPS, [{default, app_discovery}]).
@@ -132,6 +136,8 @@ report_ops([Op | Rest]) ->
     report_ops(Rest).
 
 describe_op({create_table, Table, _Cols}) ->
+    io_lib:format("missing CREATE TABLE \"~s\"", [Table]);
+describe_op({create_table, Table, _Cols, _Constraints}) ->
     io_lib:format("missing CREATE TABLE \"~s\"", [Table]);
 describe_op({drop_table, Table}) ->
     io_lib:format("schema removed table \"~s\" but no DROP TABLE migration", [Table]);

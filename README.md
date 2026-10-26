@@ -101,9 +101,51 @@ The pre-compile hook detects:
 It does **not** auto-generate:
 
 - `drop_table` operations (destructive — write manually)
-- Nullable-only changes
-- Default value changes
-- Primary key changes
+- Primary key changes (refused, see below)
+
+A table's primary key is the schema's own, as `kura_schema:key/1` resolves
+it: the optional `key/0` callback when the schema has one, otherwise the
+fields marked `primary_key = true`. A new table with a composite key is
+generated as `{create_table, Name, Columns, [{primary_key, Key}]}`, in that
+key order and with the key columns `NOT NULL`, since `PRIMARY KEY` on each
+column would declare the key more than once.
+
+New tables are created after the new tables they reference, and `down/0`
+drops them in the reverse order. New tables that reference each other in a
+cycle abort with `reference_cycle`: no order of `CREATE TABLE` can declare
+all their foreign keys inline, so they need a hand-written migration.
+
+### Primary key changes
+
+A change to the set of primary key columns of a table that already exists is
+refused, not generated: a field gaining or losing `primary_key = true`, a new
+field declared as a key, or a key field removed. The run aborts with
+`primary_key_changed`, naming the table, the column and the constraint the
+key lives under. Dropping the old key fails while another table's foreign key
+depends on it, and only the author knows which of those to move first, so the
+change needs a hand-written migration. Replay reads either way of writing it,
+and the refusal clears once that migration exists.
+
+On PostgreSQL, two statements, each in its own `execute`:
+
+- `ALTER TABLE t DROP CONSTRAINT name`, for the table's primary key under the
+  name PostgreSQL gave it (`<table>_pkey`, with the table cut to fit 63
+  bytes) or the name a replayed `ADD CONSTRAINT` gave it. The key's columns
+  stay `NOT NULL`, as they do in PostgreSQL.
+- `ALTER TABLE t ADD [CONSTRAINT name] PRIMARY KEY (c, ...)`
+
+SQLite cannot alter a primary key, so rebuild the table from structured
+operations, which replay reads on any backend:
+
+```erlang
+up() ->
+    [{create_table, ~"t_rebuild", Cols, [{primary_key, [a, b]}]},
+     {execute, ~"INSERT INTO t_rebuild (a, b) SELECT a, b FROM t"},
+     {drop_table, ~"t"},
+     {create_table, ~"t", Cols, [{primary_key, [a, b]}]},
+     {execute, ~"INSERT INTO t (a, b) SELECT a, b FROM t_rebuild"},
+     {drop_table, ~"t_rebuild"}].
+```
 
 ### Foreign keys from associations
 
@@ -188,6 +230,16 @@ quoted string (`CREATE TRIGGER`, `ADD CHECK`, a multi-column constraint, a
 default that is an expression, a `DO` block, several statements in one string,
 ...) is not replayed. `compile` and `check` print a warning per statement, so
 a drift report that follows one can be read with that in mind.
+
+### Table constraints in `create_table/4`
+
+A `{create_table, Name, Columns, Constraints}` is replayed like the
+three-element form. A `{primary_key, Cols}` constraint marks those columns as
+the primary key. `{unique, Cols}` constraints are not modelled, so `compile`
+and `check` print one warning per table that has them, the same warning as an
+unreplayed `execute`: a schema declaring the same unique index sees drift
+that is not there. A `{check, Expr}` constraint is not modelled either, but
+nothing the diff compares depends on it, so it is not reported.
 
 ### Enum handling
 
