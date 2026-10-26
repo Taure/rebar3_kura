@@ -12,7 +12,7 @@
 - Generated `up/0` creates a new table after the new tables it references, and `down/0` drops them in the reverse order and undoes table, column and constraint ops in the reverse of the order `up/0` ran them, so a rollback no longer drops a table a new column or foreign key still references (#41)
 - Replay reads `{create_table, Name, Columns, Constraints}`: the table was missing from the replayed state, so the next run generated a second `create_table` for it. A `primary_key` constraint marks its columns; `unique` and `check` constraints are reported like an unreplayed `execute` (#52)
 - Replay of a `rename_column` rewrites every table's `references` to the renamed column, as Postgres does, so the next run no longer drops and re-adds those foreign keys (#54)
-- A new table whose schema declares a composite primary key is generated as `{create_table, Name, Columns, [{primary_key, Key}]}` rather than a `create_table/3` that declares `PRIMARY KEY` on every key column and fails
+- A new table whose schema declares a composite primary key is generated as `{create_table, Name, Columns, [{primary_key, Key}]}` rather than a `create_table/3` that declares `PRIMARY KEY` on every key column and fails. Its key columns are written `nullable = false`, because SQLite, unlike PostgreSQL, lets a composite key column hold NULL. A key column left nullable in an existing hand-written migration is not reported as drift: PostgreSQL already holds it NOT NULL and SQLite cannot `SET NOT NULL`, so on SQLite such a table needs the rebuild described in the README
 
 ## [0.6.0] - 2026-02-27
 

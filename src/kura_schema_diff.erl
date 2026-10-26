@@ -242,16 +242,22 @@ diff(DbState, DesiredState) ->
 %% kura writes PRIMARY KEY inline on each column that has primary_key set,
 %% which for a composite key declares the key twice and fails. A composite
 %% key is a table constraint instead, in the column order the schema gives.
+%% Its columns are written NOT NULL: SQLite, unlike PostgreSQL, lets a
+%% composite key column hold NULL, and then (1, NULL) is not unique.
 -spec create_table(binary(), [#kura_column{}]) -> operation().
 create_table(Table, Cols) ->
     case key_columns(Cols) of
         [_, _ | _] = Key ->
-            {create_table, Table, [C#kura_column{primary_key = false} || C <- Cols], [
-                {primary_key, Key}
-            ]};
+            {create_table, Table, [unkeyed_not_null(C) || C <- Cols], [{primary_key, Key}]};
         _ ->
             {create_table, Table, Cols}
     end.
+
+-spec unkeyed_not_null(#kura_column{}) -> #kura_column{}.
+unkeyed_not_null(#kura_column{primary_key = true} = C) ->
+    C#kura_column{primary_key = false, nullable = false};
+unkeyed_not_null(C) ->
+    C.
 
 %% CREATE TABLE writes REFERENCES inline, so a new table is created once
 %% every other new table it references exists. Tables that reference each

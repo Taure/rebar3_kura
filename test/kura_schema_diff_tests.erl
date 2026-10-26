@@ -2580,8 +2580,8 @@ diff_creates_a_composite_key_as_a_table_constraint_test() ->
             [
                 {create_table, ~"t",
                     [
-                        #kura_column{name = b, type = integer},
-                        #kura_column{name = a, type = integer},
+                        #kura_column{name = b, type = integer, nullable = false},
+                        #kura_column{name = a, type = integer, nullable = false},
                         #kura_column{name = c, type = string}
                     ],
                     [{primary_key, [b, a]}]}
@@ -2600,3 +2600,21 @@ diff_keeps_a_single_key_inline_test() ->
     ?assertMatch(
         {[{create_table, ~"t", Cols}], _}, kura_schema_diff:diff(#{}, #{~"t" => Cols})
     ).
+
+diff_leaves_an_existing_nullable_composite_key_column_alone_test() ->
+    %% Postgres already holds every key column NOT NULL, and SQLite has no
+    %% ALTER COLUMN to tighten it, so a generated SET NOT NULL would be a
+    %% no-op on one and fail on the other.
+    State = replay([
+        {create_table, ~"t",
+            [#kura_column{name = a, type = integer}, #kura_column{name = b, type = integer}], [
+                {primary_key, [a, b]}
+            ]}
+    ]),
+    Desired = #{
+        ~"t" => [
+            #kura_column{name = a, type = integer, primary_key = true, nullable = false},
+            #kura_column{name = b, type = integer, primary_key = true}
+        ]
+    },
+    ?assertEqual({[], []}, kura_schema_diff:diff(State, Desired)).
