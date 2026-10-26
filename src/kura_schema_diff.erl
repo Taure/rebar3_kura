@@ -485,19 +485,24 @@ format_error({fk_not_owned, Table, Col}) ->
         [Table, Col]
     );
 format_error({primary_key_changed, Table, Col, Joins, Constraint}) when
-    is_atom(Col), is_boolean(Joins)
+    is_binary(Table), is_atom(Col), is_boolean(Joins), is_binary(Constraint)
 ->
+    AlterTable = <<"ALTER TABLE ", (quote(Table))/binary>>,
     io_lib:format(
         "table \"~s\": the schema ~s, but the generator does not change a "
         "primary key: dropping the old one fails while a foreign key depends "
         "on it. Write this change as a hand-written migration, which replay "
-        "reads. On PostgreSQL: {execute, ~~\"ALTER TABLE \\\"~s\\\" DROP CONSTRAINT "
-        "\\\"~s\\\"\"} then {execute, ~~\"ALTER TABLE \\\"~s\\\" ADD PRIMARY KEY (...)\"}. "
+        "reads. On PostgreSQL: {execute, ~s} then {execute, ~s}. "
         "On SQLite, which cannot alter a key, rebuild the table: create_table/4 "
         "a copy with {primary_key, [...]}, copy the rows with an execute, "
         "drop_table the original, create_table/4 it again and copy the rows "
         "back, then drop_table the copy",
-        [Table, key_change(Joins, Col), Table, Constraint, Table]
+        [
+            Table,
+            key_change(Joins, Col),
+            sigil(<<AlterTable/binary, " DROP CONSTRAINT ", (quote(Constraint))/binary>>),
+            sigil(<<AlterTable/binary, " ADD PRIMARY KEY (...)">>)
+        ]
     );
 format_error({reference_cycle, Tables}) when is_list(Tables) ->
     io_lib:format(
@@ -547,6 +552,12 @@ format_error({on_delete_not_owned, Mod, Name, Type}) ->
     );
 format_error(Reason) ->
     io_lib:format("~p", [Reason]).
+
+%% Escaped the way the migration renderer escapes, so the snippet pastes as
+%% Erlang whatever the table and constraint are called.
+-spec sigil(binary()) -> iodata().
+sigil(Bin) ->
+    [$~, $", binary:replace(Bin, [<<$\\>>, <<$">>], <<$\\>>, [global, {insert_replaced, 1}]), $"].
 
 -spec key_change(boolean(), atom()) -> iolist().
 key_change(true, Col) -> io_lib:format("adds column '~s' to the primary key", [Col]);

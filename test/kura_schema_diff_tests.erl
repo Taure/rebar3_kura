@@ -2626,3 +2626,24 @@ diff_refusal_survives_a_table_name_that_is_not_utf8_test() ->
         {kura_schema_diff, {primary_key_changed, Table, id, false, ~"_pkey"}},
         kura_schema_diff:diff(Db, #{Table => [#kura_column{name = id, type = id}]})
     ).
+
+format_error_primary_key_hint_pastes_as_erlang_test() ->
+    Msg = iolist_to_binary(
+        kura_schema_diff:format_error({primary_key_changed, ~"we\"ird\\x", id, false, ~"c\"k"})
+    ),
+    {match, Snippets} = re:run(
+        Msg, "\\{execute, ~\"(?:[^\"\\\\]|\\\\.)*\"\\}", [global, {capture, all, list}]
+    ),
+    ?assertEqual(
+        [
+            {execute, ~"ALTER TABLE \"we\"\"ird\\x\" DROP CONSTRAINT \"c\"\"k\""},
+            {execute, ~"ALTER TABLE \"we\"\"ird\\x\" ADD PRIMARY KEY (...)"}
+        ],
+        [eval_snippet(S) || [S] <- Snippets]
+    ).
+
+eval_snippet(Snippet) ->
+    {ok, Tokens, _} = erl_scan:string(Snippet ++ "."),
+    {ok, Exprs} = erl_parse:parse_exprs(Tokens),
+    {value, Value, _} = erl_eval:exprs(Exprs, erl_eval:new_bindings()),
+    Value.
