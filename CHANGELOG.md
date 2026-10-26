@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Generated `down/0` undoes table, column and constraint ops in the reverse of the order `up/0` ran them, and drops new tables that reference each other dependents first, so a rollback no longer drops a table a new column or foreign key still references (#41)
+
 ## [0.6.0] - 2026-02-27
 
 ### Changed

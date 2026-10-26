@@ -160,15 +160,9 @@ diff(DbState, DesiredState) ->
     FkMeta = {maps:get(fk_names, DbState, #{}), maps:get(fk_unowned, DbState, #{})},
 
     %% New tables: in desired but not in DB
-    NewTables = maps:keys(DesiredCols) -- maps:keys(DbCols),
-    {CreateUp, CreateDown} = lists:foldl(
-        fun(Table, {UpAcc, DownAcc}) ->
-            Cols = maps:get(Table, DesiredCols),
-            {UpAcc ++ [{create_table, Table, Cols}], DownAcc ++ [{drop_table, Table}]}
-        end,
-        {[], []},
-        lists:sort(NewTables)
-    ),
+    NewTables = lists:sort(maps:keys(DesiredCols) -- maps:keys(DbCols)),
+    CreateUp = [{create_table, Table, maps:get(Table, DesiredCols)} || Table <- NewTables],
+    CreateDown = [{drop_table, Table} || Table <- drop_order(NewTables, DesiredCols)],
 
     %% Existing tables: diff columns
     ExistingTables = maps:keys(DesiredCols) -- NewTables,
@@ -215,10 +209,35 @@ diff(DbState, DesiredState) ->
     %% Index drops go before the column ops and creates after them. Postgres
     %% drops an index along with a column it covers, so a later drop_index
     %% raises 42704; SQLite refuses to drop an indexed column at all.
+    %%
+    %% down/0 undoes the table, column and constraint ops in the reverse of
+    %% the order up/0 ran them: a new table cannot be dropped while a column
+    %% or foreign key added in the same migration still references it.
     {
         IdxDropUp ++ CreateUp ++ AlterUp ++ ExecUp ++ IdxCreateUp,
-        IdxDropDown ++ CreateDown ++ AlterDown ++ ExecDown ++ IdxCreateDown
+        IdxDropDown ++ ExecDown ++ AlterDown ++ CreateDown ++ IdxCreateDown
     }.
+
+%% A table goes once no other table still to be dropped references it. Tables
+%% that reference each other cannot be dropped one at a time in any order, so
+%% they are left in name order.
+-spec drop_order([binary()], col_state()) -> [binary()].
+drop_order([], _Cols) ->
+    [];
+drop_order(Tables, Cols) ->
+    case [T || T <- Tables, not referenced_by(T, Tables -- [T], Cols)] of
+        [] -> Tables;
+        Free -> Free ++ drop_order(Tables -- Free, Cols)
+    end.
+
+-spec referenced_by(binary(), [binary()], col_state()) -> boolean().
+referenced_by(Table, Others, Cols) ->
+    [
+        Other
+     || Other <- Others,
+        #kura_column{references = {Ref, _}} <- maps:get(Other, Cols),
+        Ref =:= Table
+    ] =/= [].
 
 %% Convert a kura_field to a kura_column (skipping virtual fields)
 -spec field_to_column(#kura_field{}) -> #kura_column{}.

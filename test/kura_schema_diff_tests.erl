@@ -2162,3 +2162,86 @@ diff_recreates_an_index_named_as_generated_without_its_name_test() ->
         {[{drop_index, ~"t_a_index"}], [{create_index, ~"t", [a], #{unique => true}}]},
         kura_schema_diff:diff(State, Desired)
     ).
+
+%%====================================================================
+%% down/0 undoes up/0 in reverse (Taure/rebar3_kura#41)
+%%====================================================================
+
+new_authors_table() ->
+    [#kura_column{name = id, type = id, primary_key = true}].
+
+diff_down_drops_a_new_reference_column_before_its_table_test() ->
+    Db = #{~"posts" => [#kura_column{name = id, type = id, primary_key = true}]},
+    AuthorId = #kura_column{name = author_id, type = integer, references = {~"authors", id}},
+    Desired = #{
+        ~"authors" => new_authors_table(),
+        ~"posts" => [#kura_column{name = id, type = id, primary_key = true}, AuthorId]
+    },
+    {Up, Down} = kura_schema_diff:diff(Db, Desired),
+    ?assertEqual(
+        [
+            {create_table, ~"authors", new_authors_table()},
+            {alter_table, ~"posts", [{add_column, AuthorId}]}
+        ],
+        Up
+    ),
+    ?assertEqual(
+        [{alter_table, ~"posts", [{drop_column, author_id}]}, {drop_table, ~"authors"}],
+        Down
+    ).
+
+diff_down_drops_a_new_foreign_key_before_its_table_test() ->
+    Db = #{
+        ~"posts" => [
+            #kura_column{name = id, type = id, primary_key = true},
+            #kura_column{name = author_id, type = integer}
+        ]
+    },
+    Desired = #{
+        ~"authors" => new_authors_table(),
+        ~"posts" => [
+            #kura_column{name = id, type = id, primary_key = true},
+            #kura_column{name = author_id, type = integer, references = {~"authors", id}}
+        ]
+    },
+    {_Up, Down} = kura_schema_diff:diff(Db, Desired),
+    ?assertEqual(
+        [
+            {execute, ~"ALTER TABLE \"posts\" DROP CONSTRAINT \"posts_author_id_fkey\""},
+            {drop_table, ~"authors"}
+        ],
+        Down
+    ).
+
+diff_down_drops_a_referencing_new_table_first_test() ->
+    Desired = #{
+        ~"authors" => new_authors_table(),
+        ~"books" => [
+            #kura_column{name = id, type = id, primary_key = true},
+            #kura_column{name = author_id, type = integer, references = {~"authors", id}}
+        ],
+        ~"zines" => [#kura_column{name = id, type = id, primary_key = true}]
+    },
+    {_Up, Down} = kura_schema_diff:diff(#{}, Desired),
+    ?assertEqual(
+        [{drop_table, ~"books"}, {drop_table, ~"zines"}, {drop_table, ~"authors"}],
+        Down
+    ).
+
+diff_down_drops_a_self_referencing_new_table_test() ->
+    Desired = #{
+        ~"nodes" => [
+            #kura_column{name = id, type = id, primary_key = true},
+            #kura_column{name = parent_id, type = integer, references = {~"nodes", id}}
+        ]
+    },
+    ?assertMatch({_, [{drop_table, ~"nodes"}]}, kura_schema_diff:diff(#{}, Desired)).
+
+diff_down_keeps_mutually_referencing_new_tables_test() ->
+    Desired = #{
+        ~"a" => [#kura_column{name = b_id, type = integer, references = {~"b", id}}],
+        ~"b" => [#kura_column{name = a_id, type = integer, references = {~"a", id}}]
+    },
+    ?assertMatch(
+        {_, [{drop_table, ~"a"}, {drop_table, ~"b"}]}, kura_schema_diff:diff(#{}, Desired)
+    ).
