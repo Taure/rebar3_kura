@@ -537,7 +537,8 @@ apply_ops(
             #{} -> IdxState
         end,
     State1 = alter_fk_meta(AlterOps, Name, Cols, State),
-    apply_ops(Rest, State1#{columns => ColState#{Name => NewCols}, indexes => NewIdxState});
+    NewColState = retarget_references(AlterOps, Name, ColState#{Name => NewCols}),
+    apply_ops(Rest, State1#{columns => NewColState, indexes => NewIdxState});
 apply_ops([{create_index, Table, Columns, Opts} | Rest], #{indexes := IdxState} = State) ->
     TableIdx = maps:get(Table, IdxState, []),
     Entry = {Columns, Opts},
@@ -687,6 +688,24 @@ alter_fk_meta([{rename_column, Old, New} = Op | Rest], Table, Cols, State) ->
     alter_fk_meta(Rest, Table, apply_alter_ops([Op], Cols), State1);
 alter_fk_meta([Op | Rest], Table, Cols, State) ->
     alter_fk_meta(Rest, Table, apply_alter_ops([Op], Cols), State).
+
+%% Postgres keeps a foreign key pointing at a column through its rename, so
+%% every table's reference to the old name, the renamed table's own included,
+%% follows it.
+-spec retarget_references([alter_op()], binary(), col_state()) -> col_state().
+retarget_references([], _Table, ColState) ->
+    ColState;
+retarget_references([{rename_column, Old, New} | Rest], Table, ColState) ->
+    Retargeted = #{T => [retarget(C, Table, Old, New) || C <- Cols] || T := Cols <- ColState},
+    retarget_references(Rest, Table, Retargeted);
+retarget_references([_Op | Rest], Table, ColState) ->
+    retarget_references(Rest, Table, ColState).
+
+-spec retarget(#kura_column{}, binary(), atom(), atom()) -> #kura_column{}.
+retarget(#kura_column{references = {Table, Old}} = C, Table, Old, New) ->
+    C#kura_column{references = {Table, New}};
+retarget(C, _Table, _Old, _New) ->
+    C.
 
 forget_fk_meta(Keep, State) ->
     State#{

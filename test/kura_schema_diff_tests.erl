@@ -2421,3 +2421,49 @@ replay_drop_table_forgets_a_custom_primary_key_name_test() ->
         {execute, ~"ALTER TABLE t DROP CONSTRAINT t_pkey"}
     ]),
     ?assertEqual([], kura_schema_diff:unreplayed_executes(State)).
+
+%%====================================================================
+%% Renaming a referenced column (Taure/rebar3_kura#54)
+%%====================================================================
+
+replay_rename_of_a_referenced_column_retargets_references_test() ->
+    State = replay([
+        {create_table, ~"users", [#kura_column{name = id, type = id, primary_key = true}]},
+        {create_table, ~"posts", [
+            #kura_column{name = user_id, type = integer, references = {~"users", id}}
+        ]},
+        {alter_table, ~"users", [{rename_column, id, user_id}]}
+    ]),
+    Desired = #{
+        ~"users" => [#kura_column{name = user_id, type = id, primary_key = true}],
+        ~"posts" => [
+            #kura_column{name = user_id, type = integer, references = {~"users", user_id}}
+        ]
+    },
+    ?assertEqual({[], []}, kura_schema_diff:diff(State, Desired)).
+
+replay_rename_retargets_a_self_reference_test() ->
+    State = replay([
+        {create_table, ~"nodes", [
+            #kura_column{name = id, type = id, primary_key = true},
+            #kura_column{name = parent_id, type = integer, references = {~"nodes", id}}
+        ]},
+        {alter_table, ~"nodes", [{rename_column, id, node_id}]}
+    ]),
+    ?assertEqual({~"nodes", node_id}, (col(State, ~"nodes", parent_id))#kura_column.references).
+
+replay_rename_leaves_other_references_alone_test() ->
+    State = replay([
+        {create_table, ~"users", [
+            #kura_column{name = id, type = id, primary_key = true},
+            #kura_column{name = code, type = string}
+        ]},
+        {create_table, ~"teams", [#kura_column{name = id, type = id, primary_key = true}]},
+        {create_table, ~"posts", [
+            #kura_column{name = user_code, type = string, references = {~"users", code}},
+            #kura_column{name = team_id, type = integer, references = {~"teams", id}}
+        ]},
+        {alter_table, ~"users", [{rename_column, id, user_id}]}
+    ]),
+    ?assertEqual({~"users", code}, (col(State, ~"posts", user_code))#kura_column.references),
+    ?assertEqual({~"teams", id}, (col(State, ~"posts", team_id))#kura_column.references).
