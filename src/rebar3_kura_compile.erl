@@ -260,6 +260,7 @@ derive_description(Ops) ->
             "update_schema"
     end.
 
+-spec created(binary(), [kura_schema_diff:operation()]) -> string().
 created(Table, Rest) ->
     case lists:all(fun is_index_op/1, Rest) of
         true -> "create_" ++ binary_to_list(Table);
@@ -326,9 +327,11 @@ sigil(Bin) ->
     Escaped = binary:replace(Bin, [<<$\\>>, <<$">>], <<$\\>>, [global, {insert_replaced, 1}]),
     [$~, $", Escaped, $"].
 
+-spec render_constraints([kura_migration:table_constraint()]) -> iolist().
 render_constraints(Constraints) ->
     ["[", lists:join(", ", [render_constraint(C) || C <- Constraints]), "]"].
 
+-spec render_constraint(kura_migration:table_constraint()) -> iolist().
 render_constraint({check, Expr}) ->
     ["{check, ", sigil(Expr), "}"];
 render_constraint({Kind, Cols}) ->
