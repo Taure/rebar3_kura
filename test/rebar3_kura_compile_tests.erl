@@ -242,7 +242,7 @@ extension_hint_is_a_commented_first_op_test() ->
     UpOps = [{create_table, ~"items", [#kura_column{name = e, type = {vector, 3}}]}],
     DownOps = [{drop_table, ~"items"}],
     Source = iolist_to_binary(
-        rebar3_kura_compile:render_migration("m_test_hint", UpOps, DownOps, true)
+        rebar3_kura_compile:render_migration("m_test_hint", UpOps, DownOps, [~"vector"])
     ),
     Extension = {execute, ~"CREATE EXTENSION IF NOT EXISTS vector"},
     {ok, Mod} = compile_source("m_test_hint", Source),
@@ -260,7 +260,7 @@ extension_hint_is_a_commented_first_op_test() ->
         cleanup_mod(Mod2)
     end,
     Plain = iolist_to_binary(
-        rebar3_kura_compile:render_migration("m_test_hint", UpOps, DownOps, false)
+        rebar3_kura_compile:render_migration("m_test_hint", UpOps, DownOps, [])
     ),
     ?assertEqual(nomatch, binary:match(Plain, ~"EXTENSION")).
 
@@ -288,7 +288,7 @@ generated_source_round_trips_index_options_test() ->
 
 compile_generated_migration(Desc, UpOps, DownOps) ->
     ModName = "m_test_" ++ Desc,
-    compile_source(ModName, rebar3_kura_compile:render_migration(ModName, UpOps, DownOps, false)).
+    compile_source(ModName, rebar3_kura_compile:render_migration(ModName, UpOps, DownOps, [])).
 
 compile_source(ModName, Source) ->
     Dir = make_temp_dir(),

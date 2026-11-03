@@ -4,8 +4,8 @@
 
 ### Added
 
-- `gen_schemas` reads a pgvector column's dimension, so `vector(N)` becomes `{vector, N}` instead of a bare `vector`
-- The first generated migration that adds a vector column starts `up/0` with a commented-out `{execute, ~"CREATE EXTENSION IF NOT EXISTS vector"}`, unless the history already has a vector column or creates the extension. Replay reads `CREATE EXTENSION [IF NOT EXISTS] vector` for this
+- `gen_schemas` reads a pgvector column's dimension, so `vector(N)` becomes `{vector, N}` instead of a bare `vector`, and `vector(N)[]` becomes `{array, {vector, N}}`
+- The first generated migration that adds a vector column starts `up/0` with a commented-out `{execute, ~"CREATE EXTENSION IF NOT EXISTS vector"}`, for PostgreSQL, unless the history has ever had a vector column or creates the extension. Replay reads `CREATE EXTENSION [IF NOT EXISTS] name` for this. `kura_schema_diff:required_extensions/2` lists what a set of ops needs
 
 ### Changed
 

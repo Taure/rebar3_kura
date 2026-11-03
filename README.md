@@ -61,7 +61,7 @@ $ rebar3 kura gen_schemas --force    # overwrite existing schema files
 $ rebar3 kura gen_schemas --strict   # abort on any unsupported column type
 ```
 
-Catalog identifiers are allowlist-validated before codegen; unsupported types are skipped with a warning (or abort under `--strict`). A pgvector `vector(N)` column is generated as `{vector, N}`, and one without a dimension as `vector`.
+Catalog identifiers are allowlist-validated before codegen; unsupported types are skipped with a warning (or abort under `--strict`). A pgvector `vector(N)` column is generated as `{vector, N}` (`{array, {vector, N}}` for `vector(N)[]`), and one without a dimension as `vector`.
 
 **Baseline the existing schema.** After `gen_schemas`, a `rebar3 compile` generates `create_table` migrations for tables that already exist — applying them would fail. Baseline them once with `kura_migrator:fake(Repo)`, which records every pending migration as applied **without running its DDL**, then migrate for real from there:
 
@@ -237,7 +237,7 @@ with or without a trailing `;`, and with bare or double-quoted identifiers
   `SET NULL` or `NO ACTION`
 - `ALTER TABLE t DROP CONSTRAINT name`, for a foreign key replay recorded,
   under its custom name or the generated `<table>_<column>_fkey`
-- `CREATE EXTENSION [IF NOT EXISTS] vector`, which only turns off the
+- `CREATE EXTENSION [IF NOT EXISTS] name`, which only turns off the
   extension hint described under pgvector columns
 
 A custom constraint name is remembered, so a later regeneration drops and
@@ -257,12 +257,16 @@ a drift report that follows one can be read with that in mind.
 
 ### pgvector columns
 
-The first migration that adds a `vector` or `{vector, N}` column starts its
-`up/0` with a commented-out `{execute, ~"CREATE EXTENSION IF NOT EXISTS vector"}`,
-unless a replayed table already has a vector column or a replayed `execute`
-creates the extension. pgvector is not a trusted extension, so the app's role
-usually cannot create it: uncomment the op when it can, otherwise leave the
-extension to the cluster's bootstrap. `down/0` does not drop it.
+On PostgreSQL, the first migration that adds a `vector` or `{vector, N}`
+column starts its `up/0` with a commented-out
+`{execute, ~"CREATE EXTENSION IF NOT EXISTS vector"}`, unless a replayed table
+has ever had a vector column or a replayed `execute` creates the extension.
+Uncomment it unless the extension is missing and the app's role cannot create
+it: pgvector is not a trusted extension, so creating it takes a superuser,
+but where the cluster's bootstrap already installed it the statement is a
+no-op for any role. `down/0` does not drop it. The hint is a comment because
+the generator does not know the app's backend, and the statement is
+PostgreSQL only.
 
 ### Table constraints in `create_table/4`
 

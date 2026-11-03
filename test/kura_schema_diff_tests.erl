@@ -3230,17 +3230,20 @@ diff_unnamed_index_keeps_the_generated_name_over_an_alike_one_test() ->
     ).
 
 %%====================================================================
-%% needs_vector_extension tests
+%% required_extensions tests
 %%====================================================================
 
-replayed(Mod, Ops) ->
-    meck:new(Mod, [non_strict]),
-    meck:expect(Mod, up, fun() -> Ops end),
+replayed(Mods) ->
+    [meck:new(M, [non_strict]) || {M, _} <- Mods],
+    [meck:expect(M, up, fun() -> Ops end) || {M, Ops} <- Mods],
     try
-        kura_schema_diff:build_db_state([Mod])
+        kura_schema_diff:build_db_state([M || {M, _} <- Mods])
     after
-        meck:unload(Mod)
+        meck:unload([M || {M, _} <- Mods])
     end.
+
+replayed(Mod, Ops) ->
+    replayed([{Mod, Ops}]).
 
 vector_table(Table, Type) ->
     {create_table, Table, [
@@ -3248,30 +3251,36 @@ vector_table(Table, Type) ->
         #kura_column{name = embedding, type = Type}
     ]}.
 
-needs_vector_extension_for_the_first_vector_column_test_() ->
+required_extensions_for_the_first_vector_column_test_() ->
     Empty = kura_schema_diff:build_db_state([]),
     Plain = replayed(m_vx_plain, [{create_table, ~"t", [#kura_column{name = id, type = id}]}]),
     AddCol = {alter_table, ~"t", [{add_column, #kura_column{name = e, type = {vector, 3}}}]},
     Modify = {alter_table, ~"t", [{modify_column, e, vector}]},
+    Req = fun kura_schema_diff:required_extensions/2,
     [
-        ?_assert(kura_schema_diff:needs_vector_extension(Empty, [vector_table(~"v", {vector, 3})])),
-        ?_assert(kura_schema_diff:needs_vector_extension(Empty, [vector_table(~"v", vector)])),
-        ?_assert(
-            kura_schema_diff:needs_vector_extension(Empty, [
-                {create_table, ~"v", [#kura_column{name = e, type = {vector, 3}}], []}
-            ])
+        ?_assertEqual([~"vector"], Req(Empty, [vector_table(~"v", {vector, 3})])),
+        ?_assertEqual([~"vector"], Req(Empty, [vector_table(~"v", vector)])),
+        ?_assertEqual(
+            [~"vector"],
+            Req(Empty, [{create_table, ~"v", [#kura_column{name = e, type = {vector, 3}}], []}])
         ),
-        ?_assert(
-            kura_schema_diff:needs_vector_extension(Empty, [vector_table(~"v", {array, vector})])
+        ?_assertEqual([~"vector"], Req(Empty, [vector_table(~"v", {array, {vector, 3}})])),
+        ?_assertEqual(
+            [~"vector"], Req(Empty, [vector_table(~"v", vector), vector_table(~"w", vector)])
         ),
-        ?_assert(kura_schema_diff:needs_vector_extension(Plain, [AddCol])),
-        ?_assert(kura_schema_diff:needs_vector_extension(Plain, [Modify])),
-        ?_assertNot(kura_schema_diff:needs_vector_extension(Empty, [vector_table(~"v", text)])),
-        ?_assertNot(kura_schema_diff:needs_vector_extension(Empty, []))
+        ?_assertEqual([~"vector"], Req(Plain, [AddCol])),
+        ?_assertEqual([~"vector"], Req(Plain, [Modify])),
+        ?_assertEqual([], Req(Empty, [vector_table(~"v", text)])),
+        ?_assertEqual([], Req(Empty, []))
     ].
 
-needs_vector_extension_not_once_history_has_one_test_() ->
+required_extensions_not_once_history_has_one_test_() ->
+    New = [vector_table(~"b", {vector, 3})],
     WithColumn = replayed(m_vx_col, [vector_table(~"a", {vector, 3})]),
+    Dropped = replayed([
+        {m_vx_1, [vector_table(~"a", {vector, 3})]},
+        {m_vx_2, [{alter_table, ~"a", [{drop_column, embedding}]}]}
+    ]),
     Created = [
         replayed(m_vx_ext, [{execute, SQL}])
      || SQL <- [
@@ -3290,7 +3299,11 @@ needs_vector_extension_not_once_history_has_one_test_() ->
             ~"SELECT 'CREATE EXTENSION vector'"
         ]
     ],
-    New = [vector_table(~"b", {vector, 3})],
-    [?_assertNot(kura_schema_diff:needs_vector_extension(WithColumn, New))] ++
-        [?_assertNot(kura_schema_diff:needs_vector_extension(S, New)) || S <- Created] ++
-        [?_assert(kura_schema_diff:needs_vector_extension(S, New)) || S <- Other].
+    Req = fun kura_schema_diff:required_extensions/2,
+    [?_assertEqual([], Req(S, New)) || S <- [WithColumn, Dropped | Created]] ++
+        [?_assertEqual([~"vector"], Req(S, New)) || S <- Other].
+
+replay_records_any_extension_test() ->
+    State = replayed(m_vx_trgm, [{execute, ~"CREATE EXTENSION IF NOT EXISTS pg_trgm"}]),
+    ?assertEqual(#{~"pg_trgm" => true}, maps:get(extensions, State)),
+    ?assertEqual([], kura_schema_diff:unreplayed_executes(State)).

@@ -112,8 +112,8 @@ process_app(AppInfo) ->
                 rebar_api:info("kura: schemas up to date", []);
             {UpOps, DownOps} ->
                 filelib:ensure_dir(filename:join(MigDir, ".")),
-                Hint = kura_schema_diff:needs_vector_extension(DbState, UpOps),
-                generate_migration(MigDir, UpOps, DownOps, Hint),
+                Extensions = kura_schema_diff:required_extensions(DbState, UpOps),
+                generate_migration(MigDir, UpOps, DownOps, Extensions),
                 rebar_api:info("kura: migration generated", [])
         end
     catch
@@ -207,13 +207,13 @@ cleanup(Modules) ->
 %% Migration generation
 %%====================================================================
 
-generate_migration(MigDir, UpOps, DownOps, ExtensionHint) ->
+generate_migration(MigDir, UpOps, DownOps, Extensions) ->
     Timestamp = make_timestamp(MigDir),
     Desc = derive_description(UpOps),
     ModName = lists:flatten(io_lib:format("m~s_~s", [Timestamp, Desc])),
     FileName = filename:join(MigDir, ModName ++ ".erl"),
 
-    Content = render_migration(ModName, UpOps, DownOps, ExtensionHint),
+    Content = render_migration(ModName, UpOps, DownOps, Extensions),
     ok = file:write_file(FileName, Content),
     rebar_api:info("kura: generated ~s", [FileName]).
 
@@ -276,7 +276,7 @@ is_index_op(_) -> false.
 is_execute_op({execute, _}) -> true;
 is_execute_op(_) -> false.
 
-render_migration(ModName, UpOps, DownOps, ExtensionHint) ->
+render_migration(ModName, UpOps, DownOps, Extensions) ->
     io_lib:format(
         "-module(~s).~n"
         "-moduledoc false.~n"
@@ -291,19 +291,24 @@ render_migration(ModName, UpOps, DownOps, ExtensionHint) ->
         "-spec down() -> [kura_migration:operation()].~n"
         "down() ->~n"
         "    ~s.~n",
-        [ModName, render_up_ops(UpOps, ExtensionHint), render_ops(DownOps)]
+        [ModName, render_up_ops(UpOps, Extensions), render_ops(DownOps)]
     ).
 
-render_up_ops(Ops, true) ->
+render_up_ops(Ops, []) ->
+    render_ops(Ops);
+render_up_ops(Ops, Extensions) ->
     [
-        "[%% The vector type needs the pgvector extension, which usually takes a\n"
-        "     %% superuser to create. Uncomment this if nothing else creates it:\n"
-        "     %% {execute, ~\"CREATE EXTENSION IF NOT EXISTS vector\"},\n     ",
+        "[%% On PostgreSQL these column types need an extension. Uncomment unless\n"
+        "     %% it is missing and this role cannot create it (pgvector takes a\n"
+        "     %% superuser); where it exists this is a no-op for any role.\n",
+        [
+            ["     %% {execute, ", sigil(<<"CREATE EXTENSION IF NOT EXISTS ", E/binary>>), "},\n"]
+         || E <- Extensions
+        ],
+        "     ",
         op_list(Ops),
         "]"
-    ];
-render_up_ops(Ops, false) ->
-    render_ops(Ops).
+    ].
 
 render_ops(Ops) ->
     ["[", op_list(Ops), "]"].

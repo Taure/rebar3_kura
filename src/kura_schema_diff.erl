@@ -8,7 +8,7 @@
     diff/2,
     field_to_column/1,
     format_error/1,
-    needs_vector_extension/2,
+    required_extensions/2,
     unreplayed_executes/1,
     unsupported_schemas/1
 ]).
@@ -61,7 +61,7 @@
     pk_names => #{binary() => binary()},
     keys => #{binary() => [atom()]},
     unreplayed => [binary()],
-    vector_extension => true
+    extensions => #{binary() => true}
 }.
 -type operation() ::
     {create_table, binary(), [#kura_column{}]}
@@ -92,9 +92,10 @@ build_db_state(MigModules) ->
     lists:foldl(
         fun(Mod, Acc) ->
             Ops = Mod:up(),
-            apply_ops(Ops, Acc)
+            note_extensions(apply_ops(Ops, Acc))
         end,
         #{
+            extensions => #{},
             columns => #{},
             indexes => #{},
             fk_names => #{},
@@ -190,17 +191,15 @@ unreplayed_executes(State) ->
     maps:get(unreplayed, State, []).
 
 -doc """
-Whether `UpOps` add the first pgvector column: no replayed table has one and
-no replayed `execute` creates the `vector` extension.
+The extensions the column types `UpOps` add need, such as `vector` for a
+pgvector column, less those the history already needs or creates: a replayed
+table once had a column of such a type, or a replayed `execute` runs
+`CREATE EXTENSION`.
 """.
--spec needs_vector_extension(db_state(), [operation()]) -> boolean().
-needs_vector_extension(DbState, UpOps) ->
-    not maps:is_key(vector_extension, DbState) andalso
-        not lists:any(fun is_vector/1, [
-            C#kura_column.type
-         || Cols <- maps:values(maps:get(columns, DbState, #{})), C <- Cols
-        ]) andalso
-        lists:any(fun is_vector/1, added_types(UpOps)).
+-spec required_extensions(db_state(), [operation()]) -> [binary()].
+required_extensions(DbState, UpOps) ->
+    Known = maps:get(extensions, DbState, #{}),
+    [E || E <- type_extensions(added_types(UpOps)), not is_map_key(E, Known)].
 
 added_types(Ops) ->
     [C#kura_column.type || {create_table, _, Cols} <- Ops, C <- Cols] ++
@@ -213,10 +212,18 @@ added_types(Ops) ->
                     [T || {modify_column, _, T} <- AlterOps]
         ].
 
-is_vector(vector) -> true;
-is_vector({vector, _}) -> true;
-is_vector({array, Inner}) -> is_vector(Inner);
-is_vector(_) -> false.
+%% One-way, so dropping the last such column does not ask for it again.
+note_extensions(#{columns := Cols} = State) ->
+    Seen = type_extensions([C#kura_column.type || Table <- maps:values(Cols), C <- Table]),
+    State#{extensions => maps:merge(maps:get(extensions, State, #{}), maps:from_keys(Seen, true))}.
+
+type_extensions(Types) ->
+    lists:usort([E || T <- Types, E <- [extension_for(T)], E =/= none]).
+
+extension_for(vector) -> ~"vector";
+extension_for({vector, _}) -> ~"vector";
+extension_for({array, Inner}) -> extension_for(Inner);
+extension_for(_) -> none.
 
 %% Otherwise dropping a field emits drop_column and the index declared on it
 %% comes back as a create_index on a column that no longer exists.
@@ -1338,10 +1345,8 @@ replay_constraint_drop(Stmt, State) ->
 replay_create_extension(Stmt, State) ->
     case captures(Stmt, ?CREATE_EXTENSION_RE, 2) of
         {match, [Q, B]} ->
-            case ident(Q, B) of
-                ~"vector" -> {ok, State#{vector_extension => true}};
-                _ -> nomatch
-            end;
+            Known = maps:get(extensions, State, #{}),
+            {ok, State#{extensions => Known#{ident(Q, B) => true}}};
         nomatch ->
             nomatch
     end.

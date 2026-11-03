@@ -61,7 +61,7 @@ each constraint row is `{Table, Column, ConstraintType, ForeignTable}`. Returns
 `[#{table => binary(), fields => [field()], assocs => [assoc()], skipped => [skip()]}]`
 where a field's type comes from `kura_types:from_pg_type/2`, columns of an
 unsupported or unsafe type land in `skipped`, a pgvector column with a
-dimension (a positive `TypMod`) is `{vector, N}`, and a foreign-key column with a
+dimension (a positive `TypMod`) is `{vector, N}`, in an array too, and a foreign-key column with a
 safe target yields a `belongs_to` assoc. Tables with an unsafe name are dropped.
 """.
 -spec build_tables([tuple()], [tuple()]) -> [map()].
@@ -148,6 +148,7 @@ fk_columns([_ | Rest], Acc) ->
     fk_columns(Rest, Acc).
 
 with_dimension(vector, TypMod) when is_integer(TypMod), TypMod > 0 -> {vector, TypMod};
+with_dimension({array, Inner}, TypMod) -> {array, with_dimension(Inner, TypMod)};
 with_dimension(Type, _TypMod) -> Type.
 
 is_serial(Default) when is_binary(Default) ->
