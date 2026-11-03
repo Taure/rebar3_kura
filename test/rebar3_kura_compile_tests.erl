@@ -236,6 +236,24 @@ assert_round_trip(Text) ->
         cleanup_mod(Mod)
     end.
 
+generated_source_round_trips_index_options_test() ->
+    UpOps = [
+        {create_index, ~"m", [e], #{
+            using => hnsw,
+            opclass => vector_cosine_ops,
+            with => #{m => 16, ef_construction => 64},
+            name => ~"m_e_cos"
+        }}
+    ],
+    DownOps = [{drop_index, ~"m_e_cos"}],
+    {ok, Mod} = compile_generated_migration("round_trip_index_options", UpOps, DownOps),
+    try
+        ?assertEqual(UpOps, Mod:up()),
+        ?assertEqual(DownOps, Mod:down())
+    after
+        cleanup_mod(Mod)
+    end.
+
 %%====================================================================
 %% Helpers
 %%====================================================================

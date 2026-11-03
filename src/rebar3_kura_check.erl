@@ -148,19 +148,22 @@ describe_op({drop_table, Table}) ->
 describe_op({alter_table, Table, AlterOps}) ->
     io_lib:format("missing ALTER TABLE \"~s\" (~p ops)", [Table, length(AlterOps)]);
 describe_op({create_index, Table, Cols, Opts}) ->
-    UniqueStr =
-        case maps:get(unique, Opts, false) of
-            true -> "UNIQUE ";
-            false -> ""
-        end,
     io_lib:format(
         "missing CREATE ~sINDEX on \"~s\" (~s)",
-        [UniqueStr, Table, format_cols(Cols)]
+        [unique_word(maps:get(unique, Opts, false)), Table, format_cols(Cols)]
+    );
+describe_op({create_index, Name, Table, Cols, Opts}) ->
+    io_lib:format(
+        "missing CREATE ~sINDEX \"~s\" on \"~s\" (~s)",
+        [unique_word(lists:member(unique, Opts)), Name, Table, format_cols(Cols)]
     );
 describe_op({drop_index, Name}) ->
     io_lib:format("schema removed index \"~s\" but no DROP INDEX migration", [Name]);
 describe_op({execute, SQL}) ->
     io_lib:format("missing execute: ~s", [SQL]).
+
+unique_word(true) -> "UNIQUE ";
+unique_word(_) -> "".
 
 format_cols(Cols) ->
     Names = [atom_to_list(C) || C <- Cols],

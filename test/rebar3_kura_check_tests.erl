@@ -157,6 +157,30 @@ describe_op_names_a_table_created_with_constraints_test() ->
         )
     ).
 
+describe_op_names_an_index_by_its_columns_test() ->
+    ?assertEqual(
+        "missing CREATE UNIQUE INDEX on \"t\" (a, b)",
+        lists:flatten(
+            rebar3_kura_check:describe_op({create_index, ~"t", [a, b], #{unique => true}})
+        )
+    ),
+    ?assertEqual(
+        "missing CREATE INDEX on \"t\" (a)",
+        lists:flatten(rebar3_kura_check:describe_op({create_index, ~"t", [a], #{}}))
+    ).
+
+describe_op_names_a_named_index_test() ->
+    ?assertEqual(
+        "missing CREATE UNIQUE INDEX \"t_a_key\" on \"t\" (a, b)",
+        lists:flatten(
+            rebar3_kura_check:describe_op({create_index, ~"t_a_key", ~"t", [a, b], [unique]})
+        )
+    ),
+    ?assertEqual(
+        "missing CREATE INDEX \"t_a_by\" on \"t\" (a)",
+        lists:flatten(rebar3_kura_check:describe_op({create_index, ~"t_a_by", ~"t", [a], []}))
+    ).
+
 format_error_for_schema_drift_test() ->
     %% The exact phrasing is part of the contract: it points users at
     %% the next action (`rebar3 kura compile`) so a CI failure is

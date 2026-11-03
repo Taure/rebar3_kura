@@ -137,6 +137,28 @@ drops them in the reverse order. New tables that reference each other in a
 cycle abort with `reference_cycle`: no order of `CREATE TABLE` can declare
 all their foreign keys inline, so they need a hand-written migration.
 
+### Index names and options
+
+`indexes/0` entries are matched to the migration history by columns and
+options (`unique`, `where`, `using`, `opclass`, `with`). `concurrently`
+is how an index is built, not part of it, so it is not compared, but a new
+index is generated with it. A `name` must be a binary of 1 to 63 bytes, or
+the run aborts with `invalid_index_name`. Index names are per Postgres
+schema, so two entries that resolve to the same name, declared or
+generated, in any tables, abort with `duplicate_index_name`. A declared name matches only the index of
+that name, so changing it, or changing an option of a named index, drops
+the index and creates it again. Without a `name`, an index under the
+generated name is matched first, then any alike index whose name no other
+entry declares.
+
+A named index with only `unique`, `where` and `concurrently` is generated
+as `{create_index, Name, Table, Columns, Opts}`. kura honours the name
+there on any version, and `concurrently` from kura 2.25.0. A named index
+with `using`, `opclass` or `with` is generated in the map form, which needs
+the app on kura 2.27.0 or later.
+Older kura ignores the name and those options there and builds a plain
+btree under the generated name.
+
 ### Primary key changes
 
 A change to the set of primary key columns of a table that already exists is
