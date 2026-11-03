@@ -103,18 +103,26 @@ build_db_state(MigModules) ->
 %% Convert schema modules to desired state (columns + indexes)
 -spec build_desired_state([module()]) -> db_state().
 build_desired_state(SchemaModules) ->
-    lists:foldl(
+    State = lists:foldl(
         fun desired_state_for/2,
-        #{columns => #{}, indexes => #{}, keys => #{}, unsupported => []},
+        #{columns => #{}, indexes => #{}, keys => #{}, unsupported => [], index_names => #{}},
         SchemaModules
-    ).
+    ),
+    maps:remove(index_names, State).
 
 %% A schema the generator can never express is refused on its own rather than
 %% aborting the run: one composite foreign key must not stop every other table
 %% in the application being checked for drift. Everything else is a mistake the
 %% author can fix, so it still aborts.
 desired_state_for(
-    Mod, #{columns := ColAcc, indexes := IdxAcc, keys := KeyAcc, unsupported := Unsup} = Acc
+    Mod,
+    #{
+        columns := ColAcc,
+        indexes := IdxAcc,
+        keys := KeyAcc,
+        unsupported := Unsup,
+        index_names := Claimed
+    } = Acc
 ) ->
     try
         Table = Mod:table(),
@@ -127,10 +135,13 @@ desired_state_for(
         Enriched = enrich_with_associations(Mod, Columns),
         Indexes = extract_indexes(Mod),
         ok = check_index_columns(Mod, Indexes, Enriched),
+        ok = check_index_names(Mod, Indexes),
+        Names = [index_name(Table, Cols, Opts) || {Cols, Opts} <- normalize_indexes(Indexes)],
         Acc#{
             columns => ColAcc#{Table => Enriched},
             indexes => IdxAcc#{Table => Indexes},
-            keys => KeyAcc#{Table => Key}
+            keys => KeyAcc#{Table => Key},
+            index_names => claim_index_names(Mod, Names, Claimed)
         }
     catch
         error:{kura_schema_diff, {composite_assoc_unsupported, _, _} = Reason} ->
@@ -180,6 +191,26 @@ check_index_columns(Mod, Indexes, Columns) ->
     case [Col || {Cols, _} <- Indexes, Col <- Cols, not lists:member(Col, Known)] of
         [] -> ok;
         [Col | _] -> error({kura_schema_diff, {index_unknown_column, Mod, Col}})
+    end.
+
+check_index_names(Mod, Indexes) ->
+    Invalid = [
+        N
+     || {_, Opts} <- normalize_indexes(Indexes), #{name := N} <- [Opts], not valid_index_name(N)
+    ],
+    case Invalid of
+        [] -> ok;
+        [Name | _] -> error({kura_schema_diff, {invalid_index_name, Mod, Name}})
+    end.
+
+valid_index_name(Name) ->
+    is_binary(Name) andalso byte_size(Name) > 0 andalso byte_size(Name) =< 63.
+
+%% Index names are per Postgres schema, so across tables too.
+claim_index_names(Mod, Names, Claimed) ->
+    case [N || N <- Names, is_map_key(N, Claimed)] ++ (Names -- lists:usort(Names)) of
+        [] -> maps:merge(Claimed, maps:from_keys(Names, Mod));
+        [Name | _] -> error({kura_schema_diff, {duplicate_index_name, Mod, Name}})
     end.
 
 -spec extract_indexes(module()) -> [index_entry()].
@@ -571,6 +602,16 @@ format_error({index_unknown_column, Mod, Col}) ->
         "~s: indexes/0 names column '~s', which is not a column of ~s",
         [Mod, Col, Mod]
     );
+format_error({invalid_index_name, Mod, Name}) ->
+    io_lib:format(
+        "~s: indexes/0 declares index name ~0p, which is not a binary of 1 to 63 bytes",
+        [Mod, Name]
+    );
+format_error({duplicate_index_name, Mod, Name}) ->
+    io_lib:format(
+        "~s: indexes/0 declares index name ~0p, which another index already takes",
+        [Mod, Name]
+    );
 format_error({composite_assoc_unsupported, Mod, Name}) ->
     io_lib:format(
         "~s: association '~s' has a composite foreign key; the generator cannot "
@@ -651,13 +692,13 @@ apply_ops([{create_index, Table, Columns, Opts} | Rest], #{indexes := IdxState} 
     apply_ops(Rest, State#{indexes => IdxState#{Table => TableIdx ++ [Entry]}});
 apply_ops([{create_index, Name, Table, Columns, Opts} | Rest], #{indexes := IdxState} = State) ->
     TableIdx = maps:get(Table, IdxState, []),
-    OptsMap = (proplist_to_map(Opts))#{name => Name},
+    OptsMap = (proplist_to_map(Opts))#{name => built_index_name(Name)},
     Entry = {Columns, OptsMap},
     apply_ops(Rest, State#{indexes => IdxState#{Table => TableIdx ++ [Entry]}});
 apply_ops([{drop_index, IdxName} | Rest], #{indexes := IdxState} = State) ->
     NewIdxState = maps:map(
         fun(Table, Entries) ->
-            [E || E <- Entries, entry_name(Table, E) =/= IdxName]
+            [E || E <- Entries, entry_name(Table, E) =/= built_index_name(IdxName)]
         end,
         IdxState
     ),
@@ -666,6 +707,10 @@ apply_ops([{execute, SQL} | Rest], State) ->
     apply_ops(Rest, replay_execute(SQL, State));
 apply_ops([_Other | Rest], State) ->
     apply_ops(Rest, State).
+
+%% kura writes an atom name into the SQL as its text.
+built_index_name(Name) when is_atom(Name) -> atom_to_binary(Name);
+built_index_name(Name) -> Name.
 
 -spec with_primary_key([#kura_column{}], [atom()]) -> [#kura_column{}].
 with_primary_key(Cols, Key) ->
@@ -707,16 +752,21 @@ index_name(Table, Cols) ->
     ColsBin = lists:join(~"_", [atom_to_binary(C, utf8) || C <- Cols]),
     iolist_to_binary([Table, ~"_", ColsBin, ~"_index"]).
 
+-spec index_name(binary(), [atom()], map()) -> binary().
+index_name(Table, Cols, Opts) ->
+    case is_named(Opts) of
+        true -> maps:get(name, Opts);
+        false -> index_name(Table, Cols)
+    end.
+
+is_named(#{name := Name}) when is_binary(Name), Name =/= ~"" -> true;
+is_named(_Opts) -> false.
+
 -spec proplist_to_map([atom() | {atom(), term()}]) -> map().
 proplist_to_map(Opts) ->
-    lists:foldl(
-        fun
-            (unique, Acc) -> Acc#{unique => true};
-            ({K, V}, Acc) -> Acc#{K => V};
-            (_, Acc) -> Acc
-        end,
-        #{},
-        Opts
+    maps:from_list(
+        [{Flag, true} || Flag <- Opts, lists:member(Flag, [unique, concurrently])] ++
+            [{K, V} || {K, V} <- Opts]
     ).
 
 %% Postgres drops an index along with any column it covers or its WHERE
@@ -820,7 +870,7 @@ rename(Old, Old, New) -> New;
 rename(Col, _Old, _New) -> Col.
 
 entry_name(Table, {Cols, Opts}) ->
-    maps:get(name, Opts, index_name(Table, Cols)).
+    index_name(Table, Cols, Opts).
 
 apply_alter_ops([], Cols) ->
     Cols;
@@ -850,48 +900,60 @@ apply_alter_ops([_Other | Rest], Cols) ->
     apply_alter_ops(Rest, Cols).
 
 diff_indexes(Table, DbIndexes, DesiredIndexes) ->
-    %% Normalize to sets of {Columns, Opts} for comparison
-    DbSet = normalize_indexes(DbIndexes),
-    DesiredSet = normalize_indexes(DesiredIndexes),
-    %% New indexes: in desired but not in DB
-    NewIdx = DesiredSet -- DbSet,
-    CreateUp = [{create_index, Table, Cols, Opts} || {Cols, Opts} <- NewIdx],
-    CreateDown = [{drop_index, index_name(Table, Cols)} || {Cols, _} <- NewIdx],
-    %% Dropped indexes: in DB but not in desired
-    Dropped = dropped_entries(DbSet -- DesiredSet, DbIndexes),
+    Desired = lists:enumerate(normalize_indexes(DesiredIndexes)),
+    {Named, Unnamed} = lists:partition(fun({_, {_, Opts}}) -> is_named(Opts) end, Desired),
+    Reserved = [index_name(Table, Cols, Opts) || {_, {Cols, Opts}} <- Named],
+    {New, Dropped} = match_indexes(
+        Table, Reserved, Named ++ Unnamed, normalize_indexes(DbIndexes), []
+    ),
+    Created = [E || {_, E} <- lists:sort(New)],
+    CreateUp = [create_index_op(Table, E) || E <- Created],
+    CreateDown = [{drop_index, entry_name(Table, E)} || E <- Created],
     DropUp = [{drop_index, entry_name(Table, E)} || E <- Dropped],
-    DropDown = [recreate_index(Table, E) || E <- Dropped],
+    DropDown = [create_index_op(Table, E) || E <- Dropped],
     {CreateUp ++ DropUp, CreateDown ++ DropDown}.
 
-%% Each normalised index dropped takes one DB entry: two indexes that
-%% normalise alike, one of which the schema still wants, lose only one.
-dropped_entries([], _DbIndexes) ->
-    [];
-dropped_entries([{Cols, Opts} | Rest], DbIndexes) ->
-    {Taken, Left} = take_entry(Cols, Opts, DbIndexes, []),
-    [Taken | dropped_entries(Rest, Left)].
+%% A declared name matches only the index of that name. Without one, the
+%% index under the generated name is taken first, then any alike whose name
+%% no declaration claims: a column rename keeps the old name, and so does a
+%% migration that named it. `concurrently` is how an index is built, not
+%% part of what it is, so it is not compared.
+match_indexes(_Table, _Reserved, [], Db, New) ->
+    {New, Db};
+match_indexes(Table, Reserved, [{_, {Cols, Opts}} = Wanted | Rest], Db, New) ->
+    Shape = index_shape(Opts),
+    Alike = [E || {C, O} = E <- Db, C =:= Cols, index_shape(O) =:= Shape],
+    Name = index_name(Table, Cols, Opts),
+    Named = [E || E <- Alike, entry_name(Table, E) =:= Name],
+    Spare = [E || not is_named(Opts), E <- Alike, not lists:member(entry_name(Table, E), Reserved)],
+    case Named ++ Spare of
+        [E | _] -> match_indexes(Table, Reserved, Rest, Db -- [E], New);
+        [] -> match_indexes(Table, Reserved, Rest, Db, [Wanted | New])
+    end.
 
-take_entry(Cols, Opts, [{Cols, EntryOpts} = E | Rest], Seen) ->
-    case normalize_opts(EntryOpts) of
-        Opts -> {E, lists:reverse(Seen, Rest)};
-        _ -> take_entry(Cols, Opts, Rest, [E | Seen])
-    end;
-take_entry(Cols, Opts, [E | Rest], Seen) ->
-    take_entry(Cols, Opts, Rest, [E | Seen]).
+index_shape(Opts) ->
+    maps:without([concurrently], index_opts(Opts)).
 
-%% Rolling back recreates an index under the name it had, so a later drop
-%% by that name still finds it.
-recreate_index(Table, {Cols, #{name := Name} = Opts}) ->
-    case index_name(Table, Cols) of
-        Name -> {create_index, Table, Cols, normalize_opts(Opts)};
-        _ -> {create_index, Name, Table, Cols, opts_to_proplist(normalize_opts(Opts))}
-    end;
-recreate_index(Table, {Cols, Opts}) ->
-    {create_index, Table, Cols, normalize_opts(Opts)}.
+index_opts(Opts) ->
+    Unset = [Flag || Flag := false <- maps:with([unique, concurrently], Opts)],
+    maps:without([name | Unset], Opts).
+
+%% The 5-tuple names an index on kura without Taure/kura#212 too, and builds
+%% it concurrently from kura 2.25.0. Only the map form takes using, opclass
+%% and with.
+create_index_op(Table, {Cols, Opts}) ->
+    Emit = index_opts(Opts),
+    Name = index_name(Table, Cols, Opts),
+    MapOnly = maps:without([unique, where, concurrently], Emit),
+    case {Name =:= index_name(Table, Cols), map_size(MapOnly)} of
+        {true, _} -> {create_index, Table, Cols, Emit};
+        {false, 0} -> {create_index, Name, Table, Cols, opts_to_proplist(Emit)};
+        {false, _} -> {create_index, Table, Cols, Emit#{name => Name}}
+    end.
 
 opts_to_proplist(Opts) ->
-    [unique || maps:get(unique, Opts, false) =:= true] ++
-        [{K, V} || K := V <- maps:without([unique], Opts)].
+    [Flag || Flag <- [unique, concurrently], maps:get(Flag, Opts, false) =:= true] ++
+        [{where, Where} || #{where := Where} <- [Opts]].
 
 is_drop_index({drop_index, _}) -> true;
 is_drop_index(_Op) -> false.
@@ -904,7 +966,7 @@ normalize_indexes(Indexes) ->
     [{Cols, normalize_opts(Opts)} || {Cols, Opts} <- Indexes].
 
 normalize_opts(Opts) when is_map(Opts) ->
-    maps:without([name], Opts);
+    Opts;
 normalize_opts(Opts) when is_list(Opts) ->
     proplist_to_map(Opts).
 
