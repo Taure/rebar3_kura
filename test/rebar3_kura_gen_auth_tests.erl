@@ -89,9 +89,7 @@ registration_changeset_hashes_with_nova_auth_test() ->
     end.
 
 do_writes_schemas_and_config_but_no_migration_test() ->
-    Dir = filename:join(
-        "/tmp", "rebar3_kura_gen_auth_" ++ integer_to_list(erlang:unique_integer([positive]))
-    ),
+    Dir = make_temp_dir(),
     ok = filelib:ensure_dir(filename:join([Dir, "src", "."])),
     App = rebar_app_info:dir(element(2, rebar_app_info:new(~"ga", "0.1.0")), Dir),
     State = rebar_state:project_apps(rebar_state:new(), [App]),
@@ -112,10 +110,7 @@ load_schemas() ->
     {User, Token}.
 
 compile_and_load(ModName, Source) ->
-    Dir = filename:join(
-        "/tmp", "rebar3_kura_gen_auth_" ++ integer_to_list(erlang:unique_integer([positive]))
-    ),
-    ok = filelib:ensure_dir(filename:join(Dir, ".")),
+    Dir = make_temp_dir(),
     File = filename:join(Dir, ModName ++ ".erl"),
     ok = file:write_file(File, Source),
     Include = filename:join(code:lib_dir(kura), "include"),
@@ -131,6 +126,14 @@ compile_and_load(ModName, Source) ->
         {error, Errors, _} ->
             {error, Errors}
     end.
+
+make_temp_dir() ->
+    Base = os:getenv("TMPDIR", "/tmp"),
+    Dir = filename:join(
+        Base, "rebar3_kura_gen_auth_" ++ integer_to_list(erlang:unique_integer([positive]))
+    ),
+    ok = filelib:ensure_dir(filename:join(Dir, ".")),
+    Dir.
 
 unload(Mod) ->
     ok = kura_schema:forget(Mod),
@@ -166,6 +169,7 @@ user_changeset_test_() ->
                 {"same email keeps confirmed_at", ?_test(same_email_keeps_confirmed(User))},
                 {"password length counts characters", ?_test(password_counts_characters(User))},
                 {"password longer than 1024 is refused", ?_test(password_max(User))},
+                {"password counts code points", ?_test(password_counts_code_points(User))},
                 {"invalid UTF-8 password is an error", ?_test(password_invalid_utf8(User))}
             ]
         end}.
@@ -263,6 +267,11 @@ password_max(User) ->
     Max = binary:copy(~"a", 1024),
     ?assert((registration(User, ~"a@b.com", Max, Max))#kura_changeset.valid).
 
+password_counts_code_points(User) ->
+    Combining = <<"a", (binary:copy(<<16#301/utf8>>, 2000))/binary, "bcdefghijkl">>,
+    CS = registration(User, ~"a@b.com", Combining, Combining),
+    ?assertEqual([{password, ~"should be at most 1024 character(s)"}], CS#kura_changeset.errors).
+
 password_invalid_utf8(User) ->
     Bad = <<"correct horse ", 255>>,
     CS = registration(User, ~"a@b.com", Bad, Bad),
@@ -277,6 +286,8 @@ instructions_cover_confirmation_and_normalised_login_test() ->
             "nova_auth_confirm:generate_confirm_token(ga_auth, User)",
             "nova_auth_confirm:confirm_user(ga_auth, Token)",
             "ga_user:normalize_email(RawEmail)",
+            "nova_auth_accounts:change_identity(",
+            "nova_auth_confirm:generate_confirm_token(ga_auth, Changed)",
             "confirmed_at",
             "{nova_auth, \"~> 0.2\"}"
         ]

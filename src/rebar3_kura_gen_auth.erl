@@ -1,7 +1,10 @@
 -module(rebar3_kura_gen_auth).
 
 -export([init/1, do/1, format_error/1]).
+
+-ifdef(TEST).
 -export([render_user/1, render_user_token/1, render_auth_config/1, instructions/1]).
+-endif.
 
 -define(PROVIDER, gen_auth).
 -define(NAMESPACE, kura).
@@ -159,12 +162,13 @@ render_user(App) ->
         "    CS1 = validate_chars(CS, password, 12, 1024),\n"
         "    kura_changeset:validate_confirmation(CS1, password).\n"
         "\n"
-        "%% Counted in characters: kura_changeset:validate_length/3 counts bytes.\n"
+        "%% Counted in code points, not bytes (kura_changeset:validate_length/3) or\n"
+        "%% graphemes, which let combining marks make a huge input count as short.\n"
         "validate_chars(CS, Field, Min, Max) ->\n"
         "    case kura_changeset:get_change(CS, Field) of\n"
         "        Value when is_binary(Value) ->\n"
         "            case unicode:characters_to_list(Value) of\n"
-        "                Chars when is_list(Chars) -> check_chars(CS, Field, string:length(Value), Min, Max);\n"
+        "                Chars when is_list(Chars) -> check_chars(CS, Field, length(Chars), Min, Max);\n"
         "                _ -> kura_changeset:add_error(CS, Field, ~\"is not valid UTF-8\")\n"
         "            end;\n"
         "        _ ->\n"
@@ -316,12 +320,17 @@ instructions(App) ->
         "\n"
         "   %% Emails are stored normalised, so normalise the login one too:\n"
         "   {ok, Email} = APP_user:normalize_email(RawEmail),\n"
-        "   {ok, User} = nova_auth_accounts:authenticate(APP_auth, Email, Password),\n"
-        "   %% Issue a session only when maps:get(confirmed_at, User) =/= undefined.\n"
+        "   {ok, LoggedIn} = nova_auth_accounts:authenticate(APP_auth, Email, Password),\n"
+        "   %% Issue a session only when maps:get(confirmed_at, LoggedIn) =/= undefined.\n"
         "\n"
-        "   APP_user:email_changeset/2 resets confirmed_at when the address\n"
-        "   changes: send a fresh nova_auth_confirm:generate_confirm_token/2 for\n"
-        "   the new address.\n",
+        "   Change the email through nova_auth, which checks the current password\n"
+        "   and deletes the user's tokens, so a pending confirm token cannot confirm\n"
+        "   the new address. APP_user:email_changeset/2 resets confirmed_at, so\n"
+        "   send a fresh token for the new address:\n"
+        "\n"
+        "   {ok, Changed} = nova_auth_accounts:change_identity(\n"
+        "       APP_auth, LoggedIn, CurrentPassword, #{email => NewEmail}),\n"
+        "   {ok, NewToken} = nova_auth_confirm:generate_confirm_token(APP_auth, Changed),\n",
     lists:flatten(string:replace(Template, "APP", App, all)).
 
 %%======================================================================
