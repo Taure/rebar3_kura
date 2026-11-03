@@ -3,7 +3,7 @@
 -export([init/1, do/1, format_error/1]).
 
 -ifdef(TEST).
--export([warn_deprecated/0]).
+-export([deprecation_message/0]).
 -endif.
 
 -define(PROVIDER, gen_auth).
@@ -60,11 +60,11 @@ do(State) ->
     {ok, State}.
 
 warn_deprecated() ->
-    rebar_api:warn(
-        "kura: rebar3 kura gen_auth is deprecated and will be removed in a future "
-        "release. Use rebar3 nova gen_auth from rebar3_nova, which targets nova_auth 0.3",
-        []
-    ).
+    rebar_api:warn(deprecation_message(), []).
+
+deprecation_message() ->
+    "kura: rebar3 kura gen_auth is deprecated and will be removed in a future "
+    "release. Use rebar3 nova gen_auth from rebar3_nova, which targets nova_auth 0.3".
 
 -doc false.
 -spec format_error(any()) -> iolist().
