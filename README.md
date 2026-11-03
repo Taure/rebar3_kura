@@ -133,7 +133,7 @@ A named index with only `unique`, `where` and `concurrently` is generated
 as `{create_index, Name, Table, Columns, Opts}`. kura honours the name
 there on any version, and `concurrently` from kura 2.25.0. A named index
 with `using`, `opclass` or `with` is generated in the map form, which needs
-the app on the first kura release with Taure/kura#212 (after 2.25.1).
+the app on kura 2.27.0 or later.
 Older kura ignores the name and those options there and builds a plain
 btree under the generated name.
 
