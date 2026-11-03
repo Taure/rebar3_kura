@@ -27,7 +27,7 @@ $ rebar3 compile
 ===> kura: generated src/migrations/m20260214120000_create_pets.erl
 ```
 
-When the project lists [erlfmt](https://github.com/WhatsApp/erlfmt) in `project_plugins` (or `plugins`), the generated migration is written through it, with the `print_width` and pragma setting (`require_pragma`, `insert_pragma`, `delete_pragma`) from the project's `{erlfmt, [...]}` config, so `rebar3 fmt --check` passes right after a migration is generated. The files `rebar3 kura setup` and `rebar3 kura gen_auth` write are formatted the same way. An erlfmt that is only a dependency is not the project's formatter and is not used. Without the plugin the file is written as rendered.
+When the project lists [erlfmt](https://github.com/WhatsApp/erlfmt) in `project_plugins` (or `plugins`), the generated migration is written through it, with the `print_width` and pragma setting (`require_pragma`, `insert_pragma`, `delete_pragma`) from the project's `{erlfmt, [...]}` config, so `rebar3 fmt --check` passes right after a migration is generated. The repo module `rebar3 kura setup` writes is formatted the same way. An erlfmt that is only a dependency is not the project's formatter and is not used. Without the plugin the file is written as rendered.
 
 The plugin depends on kura itself to read your schemas. Keep your project on a kura release the plugin's pin (`~> 2.25`) accepts: rebar3 loads only one copy of kura, and an older one can read schemas differently from the kura your app runs.
 
@@ -99,17 +99,7 @@ Honours each migration's optional `safe/0` callback as a per-operation opt-out.
 
 ### `rebar3 kura gen_auth`
 
-Generates email/password authentication scaffolding for [nova_auth](https://github.com/novaframework/nova_auth) 0.2:
-
-- `src/schemas/APPNAME_user.erl`: `users` with `email` (unique), `hashed_password`, `confirmed_at` and timestamps, plus `registration_changeset/2`, `password_changeset/2`, `email_changeset/2` and `normalize_email/1`. The changesets:
-  - store the email NFC-normalised and lower-cased, so the unique index sees one address whatever its case; invalid UTF-8 and a trailing newline are changeset errors
-  - require a password of 12 to 1024 characters, counted in code points (not bytes, and not graphemes, which combining marks can inflate), hashed with `nova_auth_password:hash/1`
-  - remove the plaintext `password` and `password_confirmation` from the changeset's changes and params, valid or not, so an `{error, Changeset}` that is logged does not carry it
-  - reset `confirmed_at` when the email changes
-- `src/schemas/APPNAME_user_token.erl`: `user_tokens` with `user_id` (cascading foreign key to `users`), `token`, `context`, `family_id`, `used_at` and `inserted_at`, which covers nova_auth's session, confirmation, reset and refresh tokens
-- `src/APPNAME_auth.erl`: the `nova_auth` config module, pointing at `APPNAME_repo` and the two schemas
-
-No migration is written: run `rebar3 kura compile` (or `rebar3 compile` with the pre-compile hook) to generate it from the schemas, like any other schema change. Existing files are left alone. Add `{nova_auth, "~> 0.2.0"}` to your deps (the generated files target nova_auth 0.2; `~> 0.2` would also accept 0.3). The printed next steps then show the flow: register with `nova_auth_accounts:register/3`, confirm the address with `nova_auth_confirm:generate_confirm_token/2` and `confirm_user/2`, normalise the login email with `APPNAME_user:normalize_email/1` before `nova_auth_accounts:authenticate/3`, and issue a session only when `confirmed_at` is set. Change the email with `nova_auth_accounts:change_identity/4`, which checks the current password and deletes the user's tokens, so a pending confirmation token cannot confirm the new address; `email_changeset/2` resets `confirmed_at`, so send a fresh confirmation token for the new address.
+Generates authentication schema and migration scaffolding for a new project.
 
 ## Auto-migration
 
