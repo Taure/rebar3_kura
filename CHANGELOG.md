@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- A schema with an embed declared only in `embeds/0`, and no field of the same name in `fields/0`, now gets an `add_column ... jsonb` for that embed on the next compile. `rebar3 kura check` fails until that migration is committed, so run `rebar3 kura compile` once after upgrading and commit the migration it writes
+
 ### Deprecated
 
 - `rebar3 kura gen_auth` prints a deprecation warning. gen_auth now belongs to rebar3_nova: use `rebar3 nova gen_auth`, which targets nova_auth 0.3. `rebar3 kura gen_auth` still generates the same files as before and will be removed in a future release
