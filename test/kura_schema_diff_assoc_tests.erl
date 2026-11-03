@@ -479,3 +479,43 @@ assoc_target_key_0_redefined_in_the_same_vm_is_seen_test() ->
     after
         meck:unload([fk_p_rekey, fk_c_rekey])
     end.
+
+%% A join table named before the table it references, both new in one run.
+join_table_is_created_after_the_tables_it_references_test() ->
+    meck:new(ord_post, [non_strict]),
+    meck:expect(ord_post, table, fun() -> ~"posts" end),
+    meck:expect(ord_post, fields, fun() ->
+        [#kura_field{name = id, type = id, primary_key = true}]
+    end),
+    meck:new(ord_tag, [non_strict]),
+    meck:expect(ord_tag, table, fun() -> ~"tags" end),
+    meck:expect(ord_tag, fields, fun() ->
+        [#kura_field{name = id, type = id, primary_key = true}]
+    end),
+    meck:new(ord_post_tag, [non_strict]),
+    meck:expect(ord_post_tag, table, fun() -> ~"post_tags" end),
+    meck:expect(ord_post_tag, key, fun() -> [post_id, tag_id] end),
+    meck:expect(ord_post_tag, fields, fun() ->
+        [
+            #kura_field{name = post_id, type = bigint, nullable = false},
+            #kura_field{name = tag_id, type = bigint, nullable = false}
+        ]
+    end),
+    meck:expect(ord_post_tag, associations, fun() ->
+        [
+            #kura_assoc{name = post, type = belongs_to, schema = ord_post, foreign_key = post_id},
+            #kura_assoc{name = tag, type = belongs_to, schema = ord_tag, foreign_key = tag_id}
+        ]
+    end),
+    try
+        Desired = kura_schema_diff:build_desired_state([ord_post_tag, ord_post, ord_tag]),
+        {Up, Down} = kura_schema_diff:diff(#{}, Desired),
+        Created = [element(2, Op) || Op <- Up, element(1, Op) =:= create_table],
+        ?assertEqual([~"posts", ~"tags", ~"post_tags"], Created),
+        ?assertEqual(
+            [{drop_table, ~"post_tags"}, {drop_table, ~"tags"}, {drop_table, ~"posts"}],
+            Down
+        )
+    after
+        meck:unload([ord_post, ord_tag, ord_post_tag])
+    end.
