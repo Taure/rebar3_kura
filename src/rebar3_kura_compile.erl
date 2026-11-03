@@ -22,6 +22,8 @@
 
 -include_lib("kura/include/kura.hrl").
 
+-type fmt_opt() :: {print_width, pos_integer()} | {pragma, require | insert | delete}.
+
 -define(PROVIDER, compile).
 -define(NAMESPACE, kura).
 -define(DEPS, [{default, app_discovery}]).
@@ -47,8 +49,8 @@ do(State) ->
             undefined -> rebar_state:project_apps(State);
             AppInfo -> [AppInfo]
         end,
-    ensure_code_path(State),
     FmtOpts = erlfmt_opts(State),
+    ensure_code_path(State),
     lists:foreach(fun(AppInfo) -> process_app(AppInfo, FmtOpts) end, Apps),
     {ok, State}.
 
@@ -300,23 +302,39 @@ is_index_op(_) -> false.
 is_execute_op({execute, _}) -> true;
 is_execute_op(_) -> false.
 
+%% erlfmt is not a dependency of this plugin. A project that formats with it
+%% loads it as a project plugin, and that copy, with the project's own
+%% print width and pragma setting, is the one `rebar3 fmt --check` holds
+%% generated files to. Looked up before ensure_code_path/1 adds every
+%% dependency's ebin, so an erlfmt that is only some dependency's dependency
+%% is not used. Without one the source is written as rendered.
 erlfmt_opts(State) ->
-    case rebar_state:get(State, erlfmt, []) of
-        Config when is_list(Config) ->
-            [{print_width, W} || {print_width, W} <- Config, is_integer(W), W > 0];
-        _ ->
-            []
+    case code:ensure_loaded(erlfmt) of
+        {module, erlfmt} -> erlfmt_config(rebar_state:get(State, erlfmt, []));
+        {error, _} -> none
     end.
 
-%% erlfmt is not a dependency of this plugin. A project that formats with it
-%% has it loaded as a project plugin, and that copy, with the project's own
-%% print width, is the one `rebar3 fmt --check` holds generated files to.
-%% Without it the source is written as rendered.
--spec format_source(iodata(), [{print_width, pos_integer()}]) -> binary().
+-spec erlfmt_config(term()) -> [fmt_opt()].
+erlfmt_config(Config) when is_list(Config) ->
+    Width = [{print_width, W} || {print_width, W} <- Config, is_integer(W), W > 0],
+    Pragma = [{pragma, Mode} || P <- Config, Mode <- pragma(P)],
+    lists:sublist(Width, 1) ++ lists:sublist(Pragma, 1);
+erlfmt_config(_) ->
+    [].
+
+-spec pragma(term()) -> [require | insert | delete].
+pragma(require_pragma) -> [require];
+pragma(insert_pragma) -> [insert];
+pragma(delete_pragma) -> [delete];
+pragma(_) -> [].
+
+-spec format_source(iodata(), none | [fmt_opt()]) -> binary().
+format_source(Source, none) ->
+    iolist_to_binary(Source);
 format_source(Source, Opts) ->
     Bin = iolist_to_binary(Source),
-    case {code:ensure_loaded(erlfmt), unicode:characters_to_list(Bin)} of
-        {{module, erlfmt}, Chars} when is_list(Chars) ->
+    case unicode:characters_to_list(Bin) of
+        Chars when is_list(Chars) ->
             case erlfmt:format_string(Chars, Opts) of
                 {ok, Formatted, _Warnings} -> utf8_or(Formatted, Bin);
                 _ -> Bin

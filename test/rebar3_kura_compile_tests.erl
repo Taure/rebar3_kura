@@ -349,6 +349,31 @@ erlfmt_opts_reads_print_width_test() ->
     ?assertEqual([{print_width, 80}], rebar3_kura_compile:erlfmt_opts(State)),
     ?assertEqual([], rebar3_kura_compile:erlfmt_opts(rebar_state:new())).
 
+erlfmt_opts_reads_pragma_test() ->
+    Opts = fun(Config) ->
+        rebar3_kura_compile:erlfmt_opts(rebar_state:set(rebar_state:new(), erlfmt, Config))
+    end,
+    ?assertEqual([{pragma, insert}], Opts([write, insert_pragma])),
+    ?assertEqual([{pragma, require}], Opts([require_pragma])),
+    ?assertEqual([{print_width, 90}, {pragma, delete}], Opts([delete_pragma, {print_width, 90}])).
+
+insert_pragma_is_honoured_test() ->
+    {Up, Down} = formatting_ops(),
+    Raw = rebar3_kura_compile:render_migration("m_fmt_pragma", Up, Down),
+    Out = rebar3_kura_compile:format_source(Raw, [{pragma, insert}]),
+    [FirstLine | _] = binary:split(Out, ~"\n"),
+    ?assertNotEqual(nomatch, binary:match(FirstLine, ~"@format")).
+
+require_pragma_leaves_source_without_one_as_rendered_test() ->
+    {Up, Down} = formatting_ops(),
+    Raw = iolist_to_binary(rebar3_kura_compile:render_migration("m_fmt_req", Up, Down)),
+    ?assertEqual(Raw, rebar3_kura_compile:format_source(Raw, [{pragma, require}])).
+
+no_erlfmt_writes_source_as_rendered_test() ->
+    {Up, Down} = formatting_ops(),
+    Raw = iolist_to_binary(rebar3_kura_compile:render_migration("m_fmt_none", Up, Down)),
+    ?assertEqual(Raw, rebar3_kura_compile:format_source(Raw, none)).
+
 compile_source(ModName, Source) ->
     Dir = make_temp_dir(),
     File = filename:join(Dir, ModName ++ ".erl"),
