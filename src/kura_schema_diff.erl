@@ -127,6 +127,7 @@ desired_state_for(
         Enriched = enrich_with_associations(Mod, Columns),
         Indexes = extract_indexes(Mod),
         ok = check_index_columns(Mod, Indexes, Enriched),
+        ok = check_index_names(Mod, Indexes),
         Acc#{
             columns => ColAcc#{Table => Enriched},
             indexes => IdxAcc#{Table => Indexes},
@@ -180,6 +181,18 @@ check_index_columns(Mod, Indexes, Columns) ->
     case [Col || {Cols, _} <- Indexes, Col <- Cols, not lists:member(Col, Known)] of
         [] -> ok;
         [Col | _] -> error({kura_schema_diff, {index_unknown_column, Mod, Col}})
+    end.
+
+%% Same rule as kura's migrator: a name that is not a non-empty binary is
+%% refused rather than replaced by the generated one.
+check_index_names(Mod, Indexes) ->
+    Invalid = [
+        N
+     || {_, Opts} <- normalize_indexes(Indexes), #{name := N} <- [Opts], not is_named(Opts)
+    ],
+    case Invalid of
+        [] -> ok;
+        [Name | _] -> error({kura_schema_diff, {invalid_index_name, Mod, Name}})
     end.
 
 -spec extract_indexes(module()) -> [index_entry()].
@@ -571,6 +584,11 @@ format_error({index_unknown_column, Mod, Col}) ->
         "~s: indexes/0 names column '~s', which is not a column of ~s",
         [Mod, Col, Mod]
     );
+format_error({invalid_index_name, Mod, Name}) ->
+    io_lib:format(
+        "~s: indexes/0 declares index name ~0p, which is not a non-empty binary",
+        [Mod, Name]
+    );
 format_error({composite_assoc_unsupported, Mod, Name}) ->
     io_lib:format(
         "~s: association '~s' has a composite foreign key; the generator cannot "
@@ -720,7 +738,7 @@ is_named(_Opts) -> false.
 -spec proplist_to_map([atom() | {atom(), term()}]) -> map().
 proplist_to_map(Opts) ->
     maps:from_list(
-        [{Flag, true} || Flag <- Opts, Flag =:= unique orelse Flag =:= concurrently] ++
+        [{Flag, true} || Flag <- Opts, lists:member(Flag, [unique, concurrently])] ++
             [{K, V} || {K, V} <- Opts]
     ).
 
@@ -857,7 +875,10 @@ apply_alter_ops([_Other | Rest], Cols) ->
 diff_indexes(Table, DbIndexes, DesiredIndexes) ->
     Desired = lists:enumerate(normalize_indexes(DesiredIndexes)),
     {Named, Unnamed} = lists:partition(fun({_, {_, Opts}}) -> is_named(Opts) end, Desired),
-    {New, Dropped} = match_indexes(Table, Named ++ Unnamed, normalize_indexes(DbIndexes), []),
+    Reserved = [index_name(Table, Cols, Opts) || {_, {Cols, Opts}} <- Named],
+    {New, Dropped} = match_indexes(
+        Table, Reserved, Named ++ Unnamed, normalize_indexes(DbIndexes), []
+    ),
     Created = [E || {_, E} <- lists:sort(New)],
     CreateUp = [create_index_op(Table, E) || E <- Created],
     CreateDown = [{drop_index, entry_name(Table, E)} || E <- Created],
@@ -866,36 +887,41 @@ diff_indexes(Table, DbIndexes, DesiredIndexes) ->
     {CreateUp ++ DropUp, CreateDown ++ DropDown}.
 
 %% A declared name matches only the index of that name. Without one, the
-%% index under the generated name is taken first, then any alike: a column
-%% rename keeps the old name, and so does a migration that named it.
-%% Declared names are matched first, so an undeclared one cannot take the
-%% index a declared one names.
-match_indexes(_Table, [], Db, New) ->
+%% index under the generated name is taken first, then any alike whose name
+%% no declaration claims: a column rename keeps the old name, and so does a
+%% migration that named it. `concurrently` is how an index is built, not
+%% part of what it is, so it is not compared.
+match_indexes(_Table, _Reserved, [], Db, New) ->
     {New, Db};
-match_indexes(Table, [{_, {Cols, Opts}} = Wanted | Rest], Db, New) ->
+match_indexes(Table, Reserved, [{_, {Cols, Opts}} = Wanted | Rest], Db, New) ->
     Shape = index_shape(Opts),
     Alike = [E || {C, O} = E <- Db, C =:= Cols, index_shape(O) =:= Shape],
     Name = index_name(Table, Cols, Opts),
     Named = [E || E <- Alike, entry_name(Table, E) =:= Name],
-    case Named ++ [E || not is_named(Opts), E <- Alike] of
-        [E | _] -> match_indexes(Table, Rest, Db -- [E], New);
-        [] -> match_indexes(Table, Rest, Db, [Wanted | New])
+    Spare = [E || not is_named(Opts), E <- Alike, not lists:member(entry_name(Table, E), Reserved)],
+    case Named ++ Spare of
+        [E | _] -> match_indexes(Table, Reserved, Rest, Db -- [E], New);
+        [] -> match_indexes(Table, Reserved, Rest, Db, [Wanted | New])
     end.
 
 index_shape(Opts) ->
+    maps:without([concurrently], index_opts(Opts)).
+
+index_opts(Opts) ->
     Unset = [Flag || Flag := false <- maps:with([unique, concurrently], Opts)],
     maps:without([name | Unset], Opts).
 
-%% The 5-tuple carries a name to every kura release; only the map form
-%% takes using, opclass and with.
+%% The 5-tuple names an index on kura without Taure/kura#212 too, and builds
+%% it concurrently from kura 2.25.0. Only the map form takes using, opclass
+%% and with.
 create_index_op(Table, {Cols, Opts}) ->
-    Shape = index_shape(Opts),
+    Emit = index_opts(Opts),
     Name = index_name(Table, Cols, Opts),
-    MapOnly = maps:without([unique, where, concurrently], Shape),
+    MapOnly = maps:without([unique, where, concurrently], Emit),
     case {Name =:= index_name(Table, Cols), map_size(MapOnly)} of
-        {true, _} -> {create_index, Table, Cols, Shape};
-        {false, 0} -> {create_index, Name, Table, Cols, opts_to_proplist(Shape)};
-        {false, _} -> {create_index, Table, Cols, Shape#{name => Name}}
+        {true, _} -> {create_index, Table, Cols, Emit};
+        {false, 0} -> {create_index, Name, Table, Cols, opts_to_proplist(Emit)};
+        {false, _} -> {create_index, Table, Cols, Emit#{name => Name}}
     end.
 
 opts_to_proplist(Opts) ->
