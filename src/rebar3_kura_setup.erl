@@ -92,7 +92,7 @@ check_kura_dep(State, AppDir) ->
 
 missing_dep_hint() ->
     "[!!] kura not found in deps. Add kura and a backend to rebar.config:~n"
-    "     {deps, [{kura, \"~~> 2.25\"}, {kura_postgres, \"~~> 1.1\"}]}.".
+    "     {deps, [{kura, \"~~> 2.28\"}, {kura_postgres, \"~~> 1.1\"}]}.".
 
 has_kura_in_config(AppDir) ->
     ConfigFile = filename:join(AppDir, "rebar.config"),

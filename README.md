@@ -29,7 +29,7 @@ $ rebar3 compile
 
 When the project lists [erlfmt](https://github.com/WhatsApp/erlfmt) in `project_plugins` (or `plugins`), the generated migration is written through it, with the `print_width` and pragma setting (`require_pragma`, `insert_pragma`, `delete_pragma`) from the project's `{erlfmt, [...]}` config, so `rebar3 fmt --check` passes right after a migration is generated. The repo module `rebar3 kura setup` writes is formatted the same way. An erlfmt that is only a dependency is not the project's formatter and is not used. Without the plugin the file is written as rendered.
 
-The plugin depends on kura itself to read your schemas. Keep your project on a kura release the plugin's pin (`~> 2.25`) accepts: rebar3 loads only one copy of kura, and an older one can read schemas differently from the kura your app runs.
+The plugin depends on kura itself to read your schemas. Keep your project on a kura release the plugin's pin (`~> 2.28`) accepts: rebar3 loads only one copy of kura, and an older one can read schemas differently from the kura your app runs.
 
 ### `rebar3 kura setup`
 
