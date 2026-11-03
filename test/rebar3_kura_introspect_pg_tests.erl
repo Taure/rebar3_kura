@@ -62,11 +62,12 @@ build_tables_vector_dimension_test() ->
         col(~"items", ~"unread", ~"vector", null, ~"YES", null, null),
         col(~"items", ~"width", ~"int4", null, ~"YES", null, 8),
         col(~"items", ~"history", ~"_vector", null, ~"YES", null, 4),
-        col(~"items", ~"names", ~"_varchar", null, ~"YES", null, 259)
+        col(~"items", ~"names", ~"_varchar", null, ~"YES", null, 259),
+        col(~"items", ~"one", ~"vector", null, ~"YES", null, 1)
     ],
     [T] = rebar3_kura_introspect_pg:build_tables(Cols, []),
     ?assertEqual(
-        [{vector, 1536}, vector, vector, integer, {array, {vector, 4}}, {array, text}],
+        [{vector, 1536}, vector, vector, integer, {array, {vector, 4}}, {array, text}, {vector, 1}],
         [maps:get(type, F) || F <- maps:get(fields, T)]
     ).
 

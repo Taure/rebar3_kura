@@ -298,9 +298,10 @@ render_up_ops(Ops, []) ->
     render_ops(Ops);
 render_up_ops(Ops, Extensions) ->
     [
-        "[%% On PostgreSQL these column types need an extension. Uncomment unless\n"
-        "     %% it is missing and this role cannot create it (pgvector takes a\n"
-        "     %% superuser); where it exists this is a no-op for any role.\n",
+        "[\n"
+        "     %% On PostgreSQL these column types need an extension. Uncomment\n"
+        "     %% unless it is missing and this role cannot create it; where it\n"
+        "     %% exists this is a no-op for any role.\n",
         [extension_hint(E) || E <- Extensions],
         "     ",
         op_list(Ops),

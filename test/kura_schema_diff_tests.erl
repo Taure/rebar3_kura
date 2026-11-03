@@ -3307,3 +3307,12 @@ replay_records_any_extension_test() ->
     State = replayed(m_vx_trgm, [{execute, ~"CREATE EXTENSION IF NOT EXISTS pg_trgm"}]),
     ?assertEqual(#{~"pg_trgm" => true}, maps:get(extensions, State)),
     ?assertEqual([], kura_schema_diff:unreplayed_executes(State)).
+
+required_extensions_keeps_an_earlier_extension_test() ->
+    State = replayed([
+        {m_vx_a, [{execute, ~"CREATE EXTENSION vector"}]},
+        {m_vx_b, [{execute, ~"CREATE EXTENSION pg_trgm"}]}
+    ]),
+    ?assertEqual(
+        [], kura_schema_diff:required_extensions(State, [vector_table(~"b", {vector, 3})])
+    ).

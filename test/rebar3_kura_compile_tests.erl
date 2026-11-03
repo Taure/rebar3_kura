@@ -236,8 +236,6 @@ assert_round_trip(Text) ->
         cleanup_mod(Mod)
     end.
 
-%% The hint is inert as generated, and uncommenting its op is enough to
-%% run it first.
 extension_hint_is_a_commented_first_op_test() ->
     UpOps = [{create_table, ~"items", [#kura_column{name = e, type = {vector, 3}}]}],
     DownOps = [{drop_table, ~"items"}],
