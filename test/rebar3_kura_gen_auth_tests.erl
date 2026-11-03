@@ -289,7 +289,7 @@ instructions_cover_confirmation_and_normalised_login_test() ->
             "nova_auth_accounts:change_identity(",
             "nova_auth_confirm:generate_confirm_token(ga_auth, Changed)",
             "confirmed_at",
-            "{nova_auth, \"~> 0.2\"}"
+            "{nova_auth, \"~> 0.2.0\"}"
         ]
     ],
     ?assertEqual(nomatch, string:find(Text, "APP")).

@@ -302,7 +302,7 @@ instructions(App) ->
         "\n"
         "1. Add nova_auth to your deps, and to `applications` in your .app.src:\n"
         "\n"
-        "   {deps, [..., {nova_auth, \"~> 0.2\"}]}.\n"
+        "   {deps, [..., {nova_auth, \"~> 0.2.0\"}]}.\n"
         "\n"
         "2. Run `rebar3 kura compile` to generate the migration for the users\n"
         "   and user_tokens tables from the schemas (with the pre-compile hook,\n"
