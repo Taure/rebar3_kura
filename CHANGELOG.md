@@ -4,12 +4,18 @@
 
 ### Changed
 
+- Requires kura `~> 2.25`, so the kura the plugin loads to read schemas is the current one
+- `rebar3 kura gen_auth` generates nova_auth 0.2 scaffolding: a user schema (`email`, `hashed_password`, `confirmed_at`, hashing with `nova_auth_password:hash/1`), a user token schema (with `family_id` and `used_at` for refresh tokens) and a `nova_auth` config module. It no longer writes a migration (the compile hook generates it from the schemas) or an accounts module, and no longer refers to bcrypt
+- `rebar3 kura setup` suggests `{kura, "~> 2.25"}` and `{kura_postgres, "~> 1.1"}`, and the generated repo module has no `start/0`: kura starts the pool from the `{repos, #{...}}` config at boot
+- Generated migrations are written through the project's erlfmt when it is loaded as a project plugin, so `rebar3 fmt --check` passes right after generation
 - Requires kura `~> 2.22`, for `kura_schema:forget/1`, so an edited `key/0` is read fresh in a running VM
 - New tables that reference each other in a cycle abort with `reference_cycle` instead of generating `create_table` ops no order can run (#41)
 - A change to an existing table's set of primary key columns (a field gaining or losing `primary_key = true`, a new key field, a dropped key field) aborts with `primary_key_changed`, naming the table, the column and the expected key constraint, instead of generating nothing or an `add_column` that cannot run. Replay reads the hand-written `DROP CONSTRAINT` / `ADD PRIMARY KEY` that makes the change, and a table rebuild from `create_table/4` and `drop_table` for SQLite (#53)
 
 ### Fixed
 
+- An embed declared only in `embeds/0` gets its `jsonb` column; it used to get none unless `fields/0` declared it too
+- A schema module that another schema embeds gets no table, even when it declares `-behaviour(kura_schema)` and the `table() -> ~"_embedded"` placeholder older kura guides showed; `compile` and `check` warn by name
 - Generated `up/0` creates a new table after the new tables it references, and `down/0` undoes every step of `up/0` in exactly the reverse order, across tables and columns, so a rollback no longer drops a table a new column or foreign key still references (#41)
 - Replay reads `{create_table, Name, Columns, Constraints}`: the table was missing from the replayed state, so the next run generated a second `create_table` for it. A `primary_key` constraint marks its columns; a table's `unique` constraints are reported together, once, like an unreplayed `execute`, and `check` constraints, which no diff depends on, are not reported (#52)
 - Replay of a `rename_column` rewrites every table's `references` to the renamed column, as Postgres does, so the next run no longer drops and re-adds those foreign keys (#54)

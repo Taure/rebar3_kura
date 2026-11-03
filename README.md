@@ -8,7 +8,7 @@ Add the plugin to your `rebar.config`:
 
 ```erlang
 {project_plugins, [
-    {rebar3_kura, "~> 0.14"}
+    {rebar3_kura, "~> 0.16"}
 ]}.
 
 {provider_hooks, [
@@ -26,6 +26,10 @@ Runs automatically as a pre-compile hook. Diffs your `kura_schema` modules again
 $ rebar3 compile
 ===> kura: generated src/migrations/m20260214120000_create_pets.erl
 ```
+
+When the project formats with [erlfmt](https://github.com/WhatsApp/erlfmt) as a project plugin, the generated migration is written through that erlfmt, with the `print_width` from the project's `{erlfmt, [...]}` config, so `rebar3 fmt --check` passes right after a migration is generated. Without erlfmt the file is written as rendered.
+
+The plugin depends on kura itself to read your schemas. Keep your project on a kura release the plugin's pin (`~> 2.25`) accepts: rebar3 loads only one copy of kura, and an older one can read schemas differently from the kura your app runs.
 
 ### `rebar3 kura setup`
 
@@ -49,6 +53,14 @@ CI gate. Fails the build if your `kura_schema` modules have drifted from the mig
 
 ```
 $ rebar3 kura check     # exit 1 with a drift report, or 0 if clean
+```
+
+Run it **before** anything that compiles the project. The pre-compile hook writes the missing migration during `rebar3 compile`, and so during `eunit`, `ct`, `dialyzer` and every other command that compiles first, so a `check` that runs after one of them always reports no drift. `check` compiles the schemas and migrations it reads on its own, so it works on a fresh checkout. To also catch a migration that a later step generates, fail the build when the working tree changed:
+
+```yaml
+- run: rebar3 kura check
+- run: rebar3 compile
+- run: test -z "$(git status --porcelain)"
 ```
 
 ### `rebar3 kura gen_schemas`
@@ -87,7 +99,13 @@ Honours each migration's optional `safe/0` callback as a per-operation opt-out.
 
 ### `rebar3 kura gen_auth`
 
-Generates authentication schema and migration scaffolding for a new project.
+Generates email/password authentication scaffolding for [nova_auth](https://github.com/novaframework/nova_auth) 0.2:
+
+- `src/schemas/APPNAME_user.erl`: `users` with `email` (unique), `hashed_password`, `confirmed_at` and timestamps, plus `registration_changeset/2`, `password_changeset/2` and `email_changeset/2`, hashing with `nova_auth_password:hash/1`
+- `src/schemas/APPNAME_user_token.erl`: `user_tokens` with `user_id` (cascading foreign key to `users`), `token`, `context`, `family_id`, `used_at` and `inserted_at`, which covers nova_auth's session, confirmation, reset and refresh tokens
+- `src/APPNAME_auth.erl`: the `nova_auth` config module, pointing at `APPNAME_repo` and the two schemas
+
+No migration is written: the next `rebar3 compile` generates it from the schemas, like any other schema change. Existing files are left alone. Add `{nova_auth, "~> 0.2"}` to your deps, then register and log in with `nova_auth_accounts:register/3` and `nova_auth_accounts:authenticate/3`.
 
 ## Auto-migration
 
@@ -240,6 +258,12 @@ and `check` print one warning per table that has them, the same warning as an
 unreplayed `execute`: a schema declaring the same unique index sees drift
 that is not there. A `{check, Expr}` constraint is not modelled either, but
 nothing the diff compares depends on it, so it is not reported.
+
+### Embedded schemas
+
+An embed in a schema's `embeds/0` is stored in a `jsonb` column named after it, so `#kura_embed{name = metadata, ...}` generates `#kura_column{name = metadata, type = jsonb}`. A field of the same name in `fields/0` declares the column instead, with its own type and nullability.
+
+An embedded schema module needs only `fields/0` and should not declare `-behaviour(kura_schema)`, since the hook reads every module that does. A module that declares it anyway (older kura guides showed `table() -> ~"_embedded"`) and is embedded by another schema in the same app gets no table: `compile` and `check` skip it and warn by name.
 
 ### Enum handling
 
