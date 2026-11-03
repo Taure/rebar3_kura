@@ -124,10 +124,12 @@ embed_targets(SchemaModules) ->
         #kura_embed{schema = Embedded} <- schema_embeds(Parent),
         lists:member(Embedded, SchemaModules)
     ],
-    [
-        {Mod, Parent, embedded_table(Mod)}
-     || {Mod, Parent} <- lists:sort(maps:to_list(maps:from_list(lists:reverse(Pairs))))
-    ].
+    [{Mod, Parent, embedded_table(Mod)} || {Mod, Parent} <- first_parent(Pairs)].
+
+%% One entry per embedded module, paired with the first schema that embeds it.
+-spec first_parent([{module(), module()}]) -> [{module(), module()}].
+first_parent(Pairs) ->
+    lists:sort(maps:to_list(maps:from_list(lists:reverse(Pairs)))).
 
 -spec embedded_table(module()) -> skipped | {table, binary()}.
 embedded_table(Mod) ->
