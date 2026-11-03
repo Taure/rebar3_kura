@@ -3,6 +3,10 @@
 -export([init/1, do/1, format_error/1]).
 -export([render_repo/2]).
 
+-ifdef(TEST).
+-export([missing_dep_hint/0]).
+-endif.
+
 -define(PROVIDER, setup).
 -define(NAMESPACE, kura).
 -define(DEPS, [{default, app_discovery}]).
@@ -51,7 +55,7 @@ do(State) ->
     check_kura_dep(State, AppDir),
 
     %% Step 2: Generate repo module
-    generate_repo(AppDir, ModName, AppName),
+    generate_repo(AppDir, ModName, AppName, rebar3_kura_compile:erlfmt_opts(State)),
 
     %% Step 3: Create migrations directory
     create_migrations_dir(AppDir),
@@ -82,13 +86,13 @@ check_kura_dep(State, AppDir) ->
                 true ->
                     rebar_api:info("[ok] kura dependency declared in rebar.config", []);
                 false ->
-                    rebar_api:info(
-                        "[!!] kura not found in deps. Add to rebar.config:~n"
-                        "     {deps, [{kura, \"~~> 1.2\"}]}.",
-                        []
-                    )
+                    rebar_api:info(missing_dep_hint(), [])
             end
     end.
+
+missing_dep_hint() ->
+    "[!!] kura not found in deps. Add kura and a backend to rebar.config:~n"
+    "     {deps, [{kura, \"~~> 2.25\"}, {kura_postgres, \"~~> 1.1\"}]}.".
 
 has_kura_in_config(AppDir) ->
     ConfigFile = filename:join(AppDir, "rebar.config"),
@@ -105,13 +109,13 @@ is_kura_dep({kura, _}) -> true;
 is_kura_dep({kura, _, _}) -> true;
 is_kura_dep(_) -> false.
 
-generate_repo(AppDir, ModName, AppName) ->
+generate_repo(AppDir, ModName, AppName, FmtOpts) ->
     FileName = filename:join([AppDir, "src", ModName ++ ".erl"]),
     case filelib:is_regular(FileName) of
         true ->
             rebar_api:info("[ok] ~s already exists, skipping", [ModName]);
         false ->
-            Content = render_repo(ModName, AppName),
+            Content = rebar3_kura_compile:format_source(render_repo(ModName, AppName), FmtOpts),
             ok = file:write_file(FileName, Content),
             rebar_api:info("[ok] generated ~s", [FileName])
     end.
@@ -160,7 +164,7 @@ print_next_steps(AppName, ModName) ->
         "1. Add a backend to rebar.config deps (kura 2.x split the backend~n"
         "   into separate packages):~n"
         "~n"
-        "   {kura_postgres, \"~~> 1.0\"}~n"
+        "   {kura_postgres, \"~~> 1.1\"}~n"
         "~n"
         "   List it in your .app.src `applications` after kura. The driver~n"
         "   (minato) comes with it and starts itself - nothing to order by~n"
@@ -224,7 +228,6 @@ render_repo(ModName, AppName) ->
         "~n"
         "-export([~n"
         "    otp_app/0,~n"
-        "    start/0,~n"
         "    all/1,~n"
         "    get/2,~n"
         "    get_by/2,~n"
@@ -247,7 +250,6 @@ render_repo(ModName, AppName) ->
         "~n"
         "otp_app() -> ~s.~n"
         "~n"
-        "start() -> kura_repo_worker:start(?MODULE).~n"
         "all(Q) -> kura_repo_worker:all(?MODULE, Q).~n"
         "get(Schema, Id) -> kura_repo_worker:get(?MODULE, Schema, Id).~n"
         "get_by(Schema, Clauses) -> kura_repo_worker:get_by(?MODULE, Schema, Clauses).~n"
