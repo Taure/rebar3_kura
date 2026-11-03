@@ -57,9 +57,10 @@
     fk_unowned => #{fk_key() => true},
     pk_names => #{binary() => binary()},
     keys => #{binary() => [atom()]},
-    embedded => [{module(), module()}],
+    embedded => [embedded()],
     unreplayed => [binary()]
 }.
+-type embedded() :: {module(), module(), skipped | {table, binary()}}.
 -type operation() ::
     {create_table, binary(), [#kura_column{}]}
     | {create_table, binary(), [#kura_column{}], [kura_migration:table_constraint()]}
@@ -75,7 +76,7 @@
     | {rename_column, atom(), atom()}
     | {modify_column, atom(), kura_types:kura_type()}.
 
--export_type([db_state/0, operation/0, alter_op/0]).
+-export_type([db_state/0, operation/0, alter_op/0, embedded/0]).
 
 %% Replay migrations to build current DB state
 -spec build_db_state([module()]) -> db_state().
@@ -103,19 +104,19 @@ build_db_state(MigModules) ->
     ).
 
 %% Convert schema modules to desired state (columns + indexes). A module
-%% another schema embeds has no table of its own, even when it declares
-%% -behaviour(kura_schema) and a placeholder table/0, as older kura guides
-%% told it to.
+%% another schema embeds and that has no table of its own, either no table/0
+%% or the ~"_embedded" placeholder older kura guides gave embeds, gets none.
 -spec build_desired_state([module()]) -> db_state().
 build_desired_state(SchemaModules) ->
     Embedded = embed_targets(SchemaModules),
+    Skipped = [M || {M, _Parent, skipped} <- Embedded],
     lists:foldl(
         fun desired_state_for/2,
         #{columns => #{}, indexes => #{}, keys => #{}, unsupported => [], embedded => Embedded},
-        [M || M <- SchemaModules, not lists:keymember(M, 1, Embedded)]
+        [M || M <- SchemaModules, not lists:member(M, Skipped)]
     ).
 
--spec embed_targets([module()]) -> [{module(), module()}].
+-spec embed_targets([module()]) -> [embedded()].
 embed_targets(SchemaModules) ->
     Pairs = [
         {Embedded, Parent}
@@ -123,24 +124,62 @@ embed_targets(SchemaModules) ->
         #kura_embed{schema = Embedded} <- schema_embeds(Parent),
         lists:member(Embedded, SchemaModules)
     ],
-    lists:sort(maps:to_list(maps:from_list(lists:reverse(Pairs)))).
+    [
+        {Mod, Parent, embedded_table(Mod)}
+     || {Mod, Parent} <- lists:sort(maps:to_list(maps:from_list(lists:reverse(Pairs))))
+    ].
 
+-spec embedded_table(module()) -> skipped | {table, binary()}.
+embedded_table(Mod) ->
+    case erlang:function_exported(Mod, table, 0) of
+        false ->
+            skipped;
+        true ->
+            case Mod:table() of
+                ~"_embedded" -> skipped;
+                Table -> {table, Table}
+            end
+    end.
+
+%% embeds/0 is user code, so a raise names the schema, as associations/0 does.
 -spec schema_embeds(module()) -> [#kura_embed{}].
 schema_embeds(Mod) ->
     case erlang:function_exported(Mod, embeds, 0) of
-        true -> Mod:embeds();
-        false -> []
+        false ->
+            [];
+        true ->
+            try
+                Mod:embeds()
+            catch
+                Class:Reason ->
+                    error({kura_schema_diff, {embeds_failed, Mod, Class, Reason}})
+            end
     end.
 
-%% An embed is stored in a jsonb column named after it. A field of the same
-%% name in fields/0 already declares that column, and wins.
--spec embed_columns(module(), [#kura_column{}]) -> [#kura_column{}].
-embed_columns(Mod, Columns) ->
-    Declared = [C#kura_column.name || C <- Columns],
-    [
-        #kura_column{name = Name, type = jsonb}
-     || #kura_embed{name = Name} <- schema_embeds(Mod), not lists:member(Name, Declared)
-    ].
+%% An embed is stored in a jsonb column named after it, which is the column
+%% kura_schema:column_map/1 reads and writes. A field of the same name
+%% declares that column with its own type and nullability, but kura ignores
+%% its `column`, so the generator does too.
+-spec field_columns([#kura_field{}], [atom()], [#kura_embed{}]) -> [#kura_column{}].
+field_columns(Fields, Key, Embeds) ->
+    EmbedNames = [E#kura_embed.name || E <- Embeds],
+    FieldColumns = [
+        with_key(field_to_column(embed_field(F, EmbedNames)), Key)
+     || F <- Fields, F#kura_field.virtual =/= true
+    ],
+    FieldNames = [F#kura_field.name || F <- Fields, F#kura_field.virtual =/= true],
+    FieldColumns ++
+        [
+            #kura_column{name = Name, type = jsonb}
+         || Name <- EmbedNames, not lists:member(Name, FieldNames)
+        ].
+
+-spec embed_field(#kura_field{}, [atom()]) -> #kura_field{}.
+embed_field(#kura_field{name = Name} = F, EmbedNames) ->
+    case lists:member(Name, EmbedNames) of
+        true -> F#kura_field{column = undefined};
+        false -> F
+    end.
 
 %% A schema the generator can never express is refused on its own rather than
 %% aborting the run: one composite foreign key must not stop every other table
@@ -153,11 +192,7 @@ desired_state_for(
         Table = Mod:table(),
         Fields = Mod:fields(),
         Key = schema_key(Mod, Fields),
-        FieldColumns = [
-            with_key(field_to_column(F), Key)
-         || F <- Fields, F#kura_field.virtual =/= true
-        ],
-        Columns = FieldColumns ++ embed_columns(Mod, FieldColumns),
+        Columns = field_columns(Fields, Key, schema_embeds(Mod)),
         Enriched = enrich_with_associations(Mod, Columns),
         Indexes = extract_indexes(Mod),
         ok = check_index_columns(Mod, Indexes, Enriched),
@@ -198,11 +233,13 @@ unsupported_schemas(State) ->
     maps:get(unsupported, State, []).
 
 -doc """
-Schema modules left out of a desired state because another schema embeds
-them, each paired with the first schema that does. An embedded schema is
-stored in its parent's `jsonb` column and has no table.
+Schema modules another schema embeds, each with the first schema that does
+and what the generator did with it: `skipped` when it has no table of its own
+(no `table/0`, or the `~"_embedded"` placeholder), so it is left out of the
+desired state, or `{table, Table}` when it names a real table, which is still
+generated.
 """.
--spec embedded_schemas(db_state()) -> [{module(), module()}].
+-spec embedded_schemas(db_state()) -> [embedded()].
 embedded_schemas(State) ->
     maps:get(embedded, State, []).
 
@@ -558,6 +595,8 @@ format_error({composite_target_key, Mod, Name, Target, Cols}) ->
     );
 format_error({associations_failed, Mod, Class, Reason}) ->
     io_lib:format("~s: associations/0 raised ~s:~p", [Mod, Class, Reason]);
+format_error({embeds_failed, Mod, Class, Reason}) ->
+    io_lib:format("~s: embeds/0 raised ~s:~p", [Mod, Class, Reason]);
 format_error({fk_on_update_not_owned, Table, Col, OnUpdate}) when is_atom(OnUpdate) ->
     io_lib:format(
         "table \"~s\": the foreign key on '~s' changed, but the existing "

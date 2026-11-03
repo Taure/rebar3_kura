@@ -153,17 +153,23 @@ report_unreplayed(Statements) ->
 
 %% kura's guides once told embedded schemas to declare the behaviour, and
 %% such a module is still found by find_schema_files/2.
--spec report_embedded([{module(), module()}]) -> ok.
+-spec report_embedded([kura_schema_diff:embedded()]) -> ok.
 report_embedded(Embedded) ->
-    _ = [
-        rebar_api:warn(
-            "kura: ~s is embedded by ~s, so no table is generated for it. "
-            "An embedded schema should not declare -behaviour(kura_schema)",
-            [Mod, Parent]
-        )
-     || {Mod, Parent} <- Embedded
-    ],
+    _ = [report_embedded_one(E) || E <- Embedded],
     ok.
+
+report_embedded_one({Mod, Parent, skipped}) ->
+    rebar_api:warn(
+        "kura: ~s is embedded by ~s, so no table is generated for it. "
+        "An embedded schema should not declare -behaviour(kura_schema)",
+        [Mod, Parent]
+    );
+report_embedded_one({Mod, Parent, {table, Table}}) ->
+    rebar_api:warn(
+        "kura: ~s is embedded by ~s and also declares table \"~ts\", which is "
+        "still generated. If it is only an embed, remove -behaviour(kura_schema)",
+        [Mod, Parent, Table]
+    ).
 
 find_schema_files(SrcDir, MigDir) ->
     AllErl = filelib:wildcard(filename:join([SrcDir, "**", "*.erl"])),
