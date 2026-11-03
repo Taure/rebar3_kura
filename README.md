@@ -27,7 +27,7 @@ $ rebar3 compile
 ===> kura: generated src/migrations/m20260214120000_create_pets.erl
 ```
 
-When the project formats with [erlfmt](https://github.com/WhatsApp/erlfmt) as a project plugin, the generated migration is written through that erlfmt, with the `print_width` from the project's `{erlfmt, [...]}` config, so `rebar3 fmt --check` passes right after a migration is generated. Without erlfmt the file is written as rendered.
+When the project formats with [erlfmt](https://github.com/WhatsApp/erlfmt) as a project plugin, the generated migration is written through that erlfmt, with the `print_width` and pragma setting (`require_pragma`, `insert_pragma`, `delete_pragma`) from the project's `{erlfmt, [...]}` config, so `rebar3 fmt --check` passes right after a migration is generated. Only an erlfmt that is already loaded when the plugin starts is used (a project plugin), never one that is just some dependency's dependency. Without one the file is written as rendered.
 
 The plugin depends on kura itself to read your schemas. Keep your project on a kura release the plugin's pin (`~> 2.25`) accepts: rebar3 loads only one copy of kura, and an older one can read schemas differently from the kura your app runs.
 
@@ -105,7 +105,7 @@ Generates email/password authentication scaffolding for [nova_auth](https://gith
 - `src/schemas/APPNAME_user_token.erl`: `user_tokens` with `user_id` (cascading foreign key to `users`), `token`, `context`, `family_id`, `used_at` and `inserted_at`, which covers nova_auth's session, confirmation, reset and refresh tokens
 - `src/APPNAME_auth.erl`: the `nova_auth` config module, pointing at `APPNAME_repo` and the two schemas
 
-No migration is written: the next `rebar3 compile` generates it from the schemas, like any other schema change. Existing files are left alone. Add `{nova_auth, "~> 0.2"}` to your deps, then register and log in with `nova_auth_accounts:register/3` and `nova_auth_accounts:authenticate/3`.
+No migration is written: run `rebar3 kura compile` (or `rebar3 compile` with the pre-compile hook) to generate it from the schemas, like any other schema change. Existing files are left alone. Add `{nova_auth, "~> 0.2"}` to your deps, then register and log in with `nova_auth_accounts:register/3` and `nova_auth_accounts:authenticate/3`.
 
 ## Auto-migration
 
@@ -261,9 +261,12 @@ nothing the diff compares depends on it, so it is not reported.
 
 ### Embedded schemas
 
-An embed in a schema's `embeds/0` is stored in a `jsonb` column named after it, so `#kura_embed{name = metadata, ...}` generates `#kura_column{name = metadata, type = jsonb}`. A field of the same name in `fields/0` declares the column instead, with its own type and nullability.
+An embed in a schema's `embeds/0` is stored in a `jsonb` column named after it, so `#kura_embed{name = metadata, ...}` generates `#kura_column{name = metadata, type = jsonb}`. A field of the same name in `fields/0` declares the column instead, with its own type and nullability. Its `column` is ignored, as kura ignores it when it reads and writes the embed: the column is always the embed's name.
 
-An embedded schema module needs only `fields/0` and should not declare `-behaviour(kura_schema)`, since the hook reads every module that does. A module that declares it anyway (older kura guides showed `table() -> ~"_embedded"`) and is embedded by another schema in the same app gets no table: `compile` and `check` skip it and warn by name.
+An embedded schema module needs only `fields/0` and should not declare `-behaviour(kura_schema)`, since the hook reads every module that does. A module that declares it anyway and is embedded by another schema in the same app is handled by its `table/0`:
+
+- no `table/0`, or the `~"_embedded"` placeholder older kura guides showed: no table is generated, and `compile` and `check` warn by name
+- any other table name: the module is also a table schema, so its table is still generated, with a warning that it is embedded too
 
 ### Enum handling
 
