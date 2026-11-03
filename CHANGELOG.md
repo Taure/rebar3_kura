@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- `gen_schemas` reads a pgvector column's dimension, so `vector(N)` becomes `{vector, N}` instead of a bare `vector`
+- The first generated migration that adds a vector column starts `up/0` with a commented-out `{execute, ~"CREATE EXTENSION IF NOT EXISTS vector"}`, unless the history already has a vector column or creates the extension. Replay reads `CREATE EXTENSION [IF NOT EXISTS] vector` for this
+
 ### Changed
 
 - An index declared in `indexes/0` with a `name` is created, dropped and rolled back under that name, so a rollback no longer fails with "index does not exist" and removing one of two indexes on a column drops that one. A changed `name`, or a change to `using`, `opclass` or `with` alone, generates a drop and a create of the index. An undeclared name matches the index under the generated name first, then any alike index whose name no declaration claims, so a column rename or a migration-chosen name is not drift. Default naming is unchanged. Earlier versions created a named index under the generated name, so the first diff drops such an index and recreates it under its declared name

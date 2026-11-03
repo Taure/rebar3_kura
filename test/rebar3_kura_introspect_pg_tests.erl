@@ -2,7 +2,10 @@
 -include_lib("eunit/include/eunit.hrl").
 
 col(Table, Name, Udt, Len, Nullable, Default) ->
-    {Table, Name, Udt, Len, Nullable, Default}.
+    col(Table, Name, Udt, Len, Nullable, Default, -1).
+
+col(Table, Name, Udt, Len, Nullable, Default, TypMod) ->
+    {Table, Name, Udt, Len, Nullable, Default, TypMod}.
 
 build_tables_maps_types_and_pk_test() ->
     Cols = [
@@ -51,6 +54,19 @@ build_tables_array_type_test() ->
     [T] = rebar3_kura_introspect_pg:build_tables(Cols, []),
     [F] = maps:get(fields, T),
     ?assertEqual({array, text}, maps:get(type, F)).
+
+build_tables_vector_dimension_test() ->
+    Cols = [
+        col(~"items", ~"embedding", ~"vector", null, ~"YES", null, 1536),
+        col(~"items", ~"loose", ~"vector", null, ~"YES", null, -1),
+        col(~"items", ~"unread", ~"vector", null, ~"YES", null, null),
+        col(~"items", ~"width", ~"int4", null, ~"YES", null, 8)
+    ],
+    [T] = rebar3_kura_introspect_pg:build_tables(Cols, []),
+    ?assertEqual(
+        [{vector, 1536}, vector, vector, integer],
+        [maps:get(type, F) || F <- maps:get(fields, T)]
+    ).
 
 queries_are_strings_test() ->
     ?assert(is_list(rebar3_kura_introspect_pg:columns_query())),

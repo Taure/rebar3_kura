@@ -9,7 +9,7 @@
     compile_opts/1,
     compile_all/3,
     cleanup/1,
-    render_migration/3,
+    render_migration/4,
     report_unreplayed/1
 ]).
 
@@ -112,7 +112,8 @@ process_app(AppInfo) ->
                 rebar_api:info("kura: schemas up to date", []);
             {UpOps, DownOps} ->
                 filelib:ensure_dir(filename:join(MigDir, ".")),
-                generate_migration(MigDir, UpOps, DownOps),
+                Hint = kura_schema_diff:needs_vector_extension(DbState, UpOps),
+                generate_migration(MigDir, UpOps, DownOps, Hint),
                 rebar_api:info("kura: migration generated", [])
         end
     catch
@@ -206,13 +207,13 @@ cleanup(Modules) ->
 %% Migration generation
 %%====================================================================
 
-generate_migration(MigDir, UpOps, DownOps) ->
+generate_migration(MigDir, UpOps, DownOps, ExtensionHint) ->
     Timestamp = make_timestamp(MigDir),
     Desc = derive_description(UpOps),
     ModName = lists:flatten(io_lib:format("m~s_~s", [Timestamp, Desc])),
     FileName = filename:join(MigDir, ModName ++ ".erl"),
 
-    Content = render_migration(ModName, UpOps, DownOps),
+    Content = render_migration(ModName, UpOps, DownOps, ExtensionHint),
     ok = file:write_file(FileName, Content),
     rebar_api:info("kura: generated ~s", [FileName]).
 
@@ -275,7 +276,7 @@ is_index_op(_) -> false.
 is_execute_op({execute, _}) -> true;
 is_execute_op(_) -> false.
 
-render_migration(ModName, UpOps, DownOps) ->
+render_migration(ModName, UpOps, DownOps, ExtensionHint) ->
     io_lib:format(
         "-module(~s).~n"
         "-moduledoc false.~n"
@@ -290,12 +291,25 @@ render_migration(ModName, UpOps, DownOps) ->
         "-spec down() -> [kura_migration:operation()].~n"
         "down() ->~n"
         "    ~s.~n",
-        [ModName, render_ops(UpOps), render_ops(DownOps)]
+        [ModName, render_up_ops(UpOps, ExtensionHint), render_ops(DownOps)]
     ).
 
+render_up_ops(Ops, true) ->
+    [
+        "[%% The vector type needs the pgvector extension, which usually takes a\n"
+        "     %% superuser to create. Uncomment this if nothing else creates it:\n"
+        "     %% {execute, ~\"CREATE EXTENSION IF NOT EXISTS vector\"},\n     ",
+        op_list(Ops),
+        "]"
+    ];
+render_up_ops(Ops, false) ->
+    render_ops(Ops).
+
 render_ops(Ops) ->
-    Inner = lists:join(",\n     ", [render_op(Op) || Op <- Ops]),
-    io_lib:format("[~s]", [Inner]).
+    ["[", op_list(Ops), "]"].
+
+op_list(Ops) ->
+    lists:join(",\n     ", [render_op(Op) || Op <- Ops]).
 
 render_op({create_table, Table, Cols}) ->
     ColStrs = lists:join(",\n        ", [render_column(C) || C <- Cols]),

@@ -19,11 +19,16 @@ from ever reaching code or path generation.
 -doc "SQL selecting one row per column across the public schema.".
 -spec columns_query() -> string().
 columns_query() ->
-    "SELECT table_name, column_name, udt_name, character_maximum_length, "
-    "is_nullable, column_default "
-    "FROM information_schema.columns "
-    "WHERE table_schema = 'public' "
-    "ORDER BY table_name, ordinal_position".
+    "SELECT c.table_name, c.column_name, c.udt_name, c.character_maximum_length, "
+    "c.is_nullable, c.column_default, a.atttypmod "
+    "FROM information_schema.columns c "
+    "LEFT JOIN pg_catalog.pg_namespace n ON n.nspname = c.table_schema "
+    "LEFT JOIN pg_catalog.pg_class r "
+    "  ON r.relnamespace = n.oid AND r.relname = c.table_name "
+    "LEFT JOIN pg_catalog.pg_attribute a "
+    "  ON a.attrelid = r.oid AND a.attname = c.column_name "
+    "WHERE c.table_schema = 'public' "
+    "ORDER BY c.table_name, c.ordinal_position".
 
 -doc "SQL selecting primary-key and foreign-key columns across the public schema.".
 -spec constraints_query() -> string().
@@ -51,11 +56,12 @@ valid_ident(_) ->
 -doc """
 Merge column rows and constraint rows into a list of table descriptions.
 
-Each column row is `{Table, Column, UdtName, CharMaxLen, IsNullable, Default}`;
+Each column row is `{Table, Column, UdtName, CharMaxLen, IsNullable, Default, TypMod}`;
 each constraint row is `{Table, Column, ConstraintType, ForeignTable}`. Returns
 `[#{table => binary(), fields => [field()], assocs => [assoc()], skipped => [skip()]}]`
 where a field's type comes from `kura_types:from_pg_type/2`, columns of an
-unsupported or unsafe type land in `skipped`, and a foreign-key column with a
+unsupported or unsafe type land in `skipped`, a pgvector column with a
+dimension (a positive `TypMod`) is `{vector, N}`, and a foreign-key column with a
 safe target yields a `belongs_to` assoc. Tables with an unsafe name are dropped.
 """.
 -spec build_tables([tuple()], [tuple()]) -> [map()].
@@ -84,7 +90,9 @@ build_fields(Table, Cols, TablePks) ->
 
 build_fields(_Table, [], _TablePks, Fields, Skipped) ->
     {lists:reverse(Fields), lists:reverse(Skipped)};
-build_fields(Table, [{_T, Column, Udt, CharLen, IsNullable, Default} | Rest], TablePks, Fs, Sk) ->
+build_fields(
+    Table, [{_T, Column, Udt, CharLen, IsNullable, Default, TypMod} | Rest], TablePks, Fs, Sk
+) ->
     case valid_ident(Column) of
         false ->
             build_fields(Table, Rest, TablePks, Fs, [{Table, Column, ~"unsafe identifier"} | Sk]);
@@ -96,7 +104,7 @@ build_fields(Table, [{_T, Column, Udt, CharLen, IsNullable, Default} | Rest], Ta
                 Type ->
                     Field = #{
                         name => Column,
-                        type => Type,
+                        type => with_dimension(Type, TypMod),
                         primary_key => lists:member(Column, TablePks),
                         nullable => IsNullable =:= ~"YES"
                     },
@@ -106,11 +114,11 @@ build_fields(Table, [{_T, Column, Udt, CharLen, IsNullable, Default} | Rest], Ta
 
 group_by_table(ColumnRows) ->
     Tables = distinct_tables(ColumnRows, []),
-    [{T, [Row || {T2, _, _, _, _, _} = Row <- ColumnRows, T2 =:= T]} || T <- Tables].
+    [{T, [Row || {T2, _, _, _, _, _, _} = Row <- ColumnRows, T2 =:= T]} || T <- Tables].
 
 distinct_tables([], Acc) ->
     lists:reverse(Acc);
-distinct_tables([{T, _, _, _, _, _} | Rest], Acc) ->
+distinct_tables([{T, _, _, _, _, _, _} | Rest], Acc) ->
     case lists:member(T, Acc) of
         true -> distinct_tables(Rest, Acc);
         false -> distinct_tables(Rest, [T | Acc])
@@ -138,6 +146,9 @@ fk_columns([{Table, Column, ~"FOREIGN KEY", ForeignTable} | Rest], Acc) when
     fk_columns(Rest, Acc#{Table => Inner#{Column => ForeignTable}});
 fk_columns([_ | Rest], Acc) ->
     fk_columns(Rest, Acc).
+
+with_dimension(vector, TypMod) when is_integer(TypMod), TypMod > 0 -> {vector, TypMod};
+with_dimension(Type, _TypMod) -> Type.
 
 is_serial(Default) when is_binary(Default) ->
     binary:match(Default, ~"nextval(") =/= nomatch;
