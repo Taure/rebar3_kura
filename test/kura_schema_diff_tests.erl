@@ -210,7 +210,7 @@ build_desired_state_test() ->
 
 build_desired_state_empty_test() ->
     ?assertEqual(
-        #{columns => #{}, indexes => #{}, keys => #{}, unsupported => []},
+        #{columns => #{}, indexes => #{}, keys => #{}, unsupported => [], embedded => []},
         kura_schema_diff:build_desired_state([])
     ).
 

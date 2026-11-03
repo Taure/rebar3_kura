@@ -10,7 +10,8 @@
     compile_all/3,
     cleanup/1,
     render_migration/3,
-    report_unreplayed/1
+    report_unreplayed/1,
+    report_embedded/1
 ]).
 
 -ifdef(TEST).
@@ -106,6 +107,7 @@ process_app(AppInfo) ->
         DbState = kura_schema_diff:build_db_state(MigMods),
         report_unreplayed(kura_schema_diff:unreplayed_executes(DbState)),
         DesiredState = kura_schema_diff:build_desired_state(SchemaMods),
+        report_embedded(kura_schema_diff:embedded_schemas(DesiredState)),
         report_unsupported(kura_schema_diff:unsupported_schemas(DesiredState)),
         case kura_schema_diff:diff(DbState, DesiredState) of
             {[], []} ->
@@ -143,6 +145,20 @@ report_unreplayed(Statements) ->
             [SQL]
         )
      || SQL <- Statements
+    ],
+    ok.
+
+%% kura's guides once told embedded schemas to declare the behaviour, and
+%% such a module is still found by find_schema_files/2.
+-spec report_embedded([{module(), module()}]) -> ok.
+report_embedded(Embedded) ->
+    _ = [
+        rebar_api:warn(
+            "kura: ~s is embedded by ~s, so no table is generated for it. "
+            "An embedded schema should not declare -behaviour(kura_schema)",
+            [Mod, Parent]
+        )
+     || {Mod, Parent} <- Embedded
     ],
     ok.
 

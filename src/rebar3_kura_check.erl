@@ -95,6 +95,7 @@ check_app(AppInfo) ->
         DbState = kura_schema_diff:build_db_state(MigMods),
         rebar3_kura_compile:report_unreplayed(kura_schema_diff:unreplayed_executes(DbState)),
         DesiredState = kura_schema_diff:build_desired_state(SchemaMods),
+        rebar3_kura_compile:report_embedded(kura_schema_diff:embedded_schemas(DesiredState)),
         report_unsupported(kura_schema_diff:unsupported_schemas(DesiredState)),
         case kura_schema_diff:diff(DbState, DesiredState) of
             {[], []} -> none;
