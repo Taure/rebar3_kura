@@ -101,11 +101,15 @@ Honours each migration's optional `safe/0` callback as a per-operation opt-out.
 
 Generates email/password authentication scaffolding for [nova_auth](https://github.com/novaframework/nova_auth) 0.2:
 
-- `src/schemas/APPNAME_user.erl`: `users` with `email` (unique), `hashed_password`, `confirmed_at` and timestamps, plus `registration_changeset/2`, `password_changeset/2` and `email_changeset/2`, hashing with `nova_auth_password:hash/1`
+- `src/schemas/APPNAME_user.erl`: `users` with `email` (unique), `hashed_password`, `confirmed_at` and timestamps, plus `registration_changeset/2`, `password_changeset/2`, `email_changeset/2` and `normalize_email/1`. The changesets:
+  - store the email NFC-normalised and lower-cased, so the unique index sees one address whatever its case; invalid UTF-8 and a trailing newline are changeset errors
+  - require a password of 12 to 1024 characters (characters, not bytes), hashed with `nova_auth_password:hash/1`
+  - remove the plaintext `password` and `password_confirmation` from the changeset's changes and params, valid or not, so an `{error, Changeset}` that is logged does not carry it
+  - reset `confirmed_at` when the email changes
 - `src/schemas/APPNAME_user_token.erl`: `user_tokens` with `user_id` (cascading foreign key to `users`), `token`, `context`, `family_id`, `used_at` and `inserted_at`, which covers nova_auth's session, confirmation, reset and refresh tokens
 - `src/APPNAME_auth.erl`: the `nova_auth` config module, pointing at `APPNAME_repo` and the two schemas
 
-No migration is written: run `rebar3 kura compile` (or `rebar3 compile` with the pre-compile hook) to generate it from the schemas, like any other schema change. Existing files are left alone. Add `{nova_auth, "~> 0.2"}` to your deps, then register and log in with `nova_auth_accounts:register/3` and `nova_auth_accounts:authenticate/3`.
+No migration is written: run `rebar3 kura compile` (or `rebar3 compile` with the pre-compile hook) to generate it from the schemas, like any other schema change. Existing files are left alone. Add `{nova_auth, "~> 0.2"}` to your deps. The printed next steps then show the flow: register with `nova_auth_accounts:register/3`, confirm the address with `nova_auth_confirm:generate_confirm_token/2` and `confirm_user/2`, normalise the login email with `APPNAME_user:normalize_email/1` before `nova_auth_accounts:authenticate/3`, and issue a session only when `confirmed_at` is set. After an email change, send a fresh confirmation token for the new address.
 
 ## Auto-migration
 
