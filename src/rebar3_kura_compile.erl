@@ -11,7 +11,9 @@
     cleanup/1,
     render_migration/3,
     report_unreplayed/1,
-    report_embedded/1
+    report_embedded/1,
+    erlfmt_opts/1,
+    format_source/2
 ]).
 
 -ifdef(TEST).
@@ -46,7 +48,8 @@ do(State) ->
             AppInfo -> [AppInfo]
         end,
     ensure_code_path(State),
-    lists:foreach(fun(AppInfo) -> process_app(AppInfo) end, Apps),
+    FmtOpts = erlfmt_opts(State),
+    lists:foreach(fun(AppInfo) -> process_app(AppInfo, FmtOpts) end, Apps),
     {ok, State}.
 
 format_error(Reason) ->
@@ -91,7 +94,7 @@ ensure_kura_on_path(State) ->
             ok
     end.
 
-process_app(AppInfo) ->
+process_app(AppInfo, FmtOpts) ->
     AppDir = rebar_app_info:dir(AppInfo),
     SrcDir = filename:join(AppDir, "src"),
     MigDir = filename:join(SrcDir, "migrations"),
@@ -114,7 +117,7 @@ process_app(AppInfo) ->
                 rebar_api:info("kura: schemas up to date", []);
             {UpOps, DownOps} ->
                 filelib:ensure_dir(filename:join(MigDir, ".")),
-                generate_migration(MigDir, UpOps, DownOps),
+                generate_migration(MigDir, UpOps, DownOps, FmtOpts),
                 rebar_api:info("kura: migration generated", [])
         end
     catch
@@ -222,13 +225,13 @@ cleanup(Modules) ->
 %% Migration generation
 %%====================================================================
 
-generate_migration(MigDir, UpOps, DownOps) ->
+generate_migration(MigDir, UpOps, DownOps, FmtOpts) ->
     Timestamp = make_timestamp(MigDir),
     Desc = derive_description(UpOps),
     ModName = lists:flatten(io_lib:format("m~s_~s", [Timestamp, Desc])),
     FileName = filename:join(MigDir, ModName ++ ".erl"),
 
-    Content = render_migration(ModName, UpOps, DownOps),
+    Content = format_source(render_migration(ModName, UpOps, DownOps), FmtOpts),
     ok = file:write_file(FileName, Content),
     rebar_api:info("kura: generated ~s", [FileName]).
 
@@ -290,6 +293,38 @@ is_index_op(_) -> false.
 
 is_execute_op({execute, _}) -> true;
 is_execute_op(_) -> false.
+
+erlfmt_opts(State) ->
+    case rebar_state:get(State, erlfmt, []) of
+        Config when is_list(Config) ->
+            [{print_width, W} || {print_width, W} <- Config, is_integer(W), W > 0];
+        _ ->
+            []
+    end.
+
+%% erlfmt is not a dependency of this plugin. A project that formats with it
+%% has it loaded as a project plugin, and that copy, with the project's own
+%% print width, is the one `rebar3 fmt --check` holds generated files to.
+%% Without it the source is written as rendered.
+-spec format_source(iodata(), [{print_width, pos_integer()}]) -> binary().
+format_source(Source, Opts) ->
+    Bin = iolist_to_binary(Source),
+    case {code:ensure_loaded(erlfmt), unicode:characters_to_list(Bin)} of
+        {{module, erlfmt}, Chars} when is_list(Chars) ->
+            case erlfmt:format_string(Chars, Opts) of
+                {ok, Formatted, _Warnings} -> utf8_or(Formatted, Bin);
+                _ -> Bin
+            end;
+        _ ->
+            Bin
+    end.
+
+-spec utf8_or(string(), binary()) -> binary().
+utf8_or(Chars, Fallback) ->
+    case unicode:characters_to_binary(Chars) of
+        Out when is_binary(Out) -> Out;
+        _ -> Fallback
+    end.
 
 render_migration(ModName, UpOps, DownOps) ->
     io_lib:format(

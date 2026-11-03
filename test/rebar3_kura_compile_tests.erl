@@ -284,3 +284,82 @@ cleanup_dir(Dir) ->
         false ->
             ok
     end.
+
+%%====================================================================
+%% Formatting generated migrations with the project's erlfmt
+%%====================================================================
+
+formatting_ops() ->
+    Up = [
+        {create_table, ~"post_tags",
+            [
+                #kura_column{
+                    name = post_id,
+                    type = bigint,
+                    nullable = false,
+                    references = {~"posts", id},
+                    on_delete = cascade
+                },
+                #kura_column{name = tag_id, type = bigint, nullable = false}
+            ],
+            [{primary_key, [post_id, tag_id]}]},
+        {alter_table, ~"posts", [{add_column, #kura_column{name = metadata, type = jsonb}}]},
+        {create_index, ~"post_tags", [post_id, tag_id], #{unique => true}}
+    ],
+    Down = [{drop_table, ~"post_tags"}, {alter_table, ~"posts", [{drop_column, metadata}]}],
+    {Up, Down}.
+
+formatted_migration_passes_erlfmt_check_test() ->
+    {Up, Down} = formatting_ops(),
+    Raw = iolist_to_binary(rebar3_kura_compile:render_migration("m_fmt", Up, Down)),
+    Formatted = rebar3_kura_compile:format_source(Raw, []),
+    ?assertNotEqual(Raw, Formatted),
+    Chars = binary_to_list(Formatted),
+    ?assertEqual({ok, Chars, []}, erlfmt:format_string(Chars, [])).
+
+formatted_migration_keeps_its_operations_test() ->
+    {Up, Down} = formatting_ops(),
+    Raw = rebar3_kura_compile:render_migration("m_fmt_ops", Up, Down),
+    {ok, Mod} = compile_source("m_fmt_ops", rebar3_kura_compile:format_source(Raw, [])),
+    try
+        ?assertEqual(Up, Mod:up()),
+        ?assertEqual(Down, Mod:down())
+    after
+        cleanup_mod(Mod)
+    end.
+
+formatting_honours_print_width_test() ->
+    {Up, Down} = formatting_ops(),
+    Raw = rebar3_kura_compile:render_migration("m_fmt_width", Up, Down),
+    Wide = rebar3_kura_compile:format_source(Raw, [{print_width, 200}]),
+    Lines = string:split(Wide, ~"\n", all),
+    ?assert(lists:any(fun(L) -> byte_size(L) > 100 end, Lines)).
+
+formatting_keeps_non_ascii_names_test() ->
+    Up = [{create_table, ~"caf\x{e9}", [#kura_column{name = id, type = id, primary_key = true}]}],
+    Raw = rebar3_kura_compile:render_migration("m_fmt_utf8", Up, [{drop_table, ~"caf\x{e9}"}]),
+    Formatted = rebar3_kura_compile:format_source(Raw, []),
+    ?assertNotEqual(nomatch, binary:match(Formatted, ~"~\"caf\x{e9}\"")).
+
+unparsable_source_is_written_as_rendered_test() ->
+    ?assertEqual(~"-module(.\n", rebar3_kura_compile:format_source(~"-module(.\n", [])).
+
+erlfmt_opts_reads_print_width_test() ->
+    State = rebar_state:set(rebar_state:new(), erlfmt, [write, {print_width, 80}, {files, []}]),
+    ?assertEqual([{print_width, 80}], rebar3_kura_compile:erlfmt_opts(State)),
+    ?assertEqual([], rebar3_kura_compile:erlfmt_opts(rebar_state:new())).
+
+compile_source(ModName, Source) ->
+    Dir = make_temp_dir(),
+    File = filename:join(Dir, ModName ++ ".erl"),
+    ok = file:write_file(File, Source),
+    Include = filename:join(code:lib_dir(kura), "include"),
+    Result = compile:file(File, [binary, return_errors, {i, Include}]),
+    cleanup_dir(Dir),
+    case Result of
+        {ok, Mod, Bin} when is_atom(Mod), is_binary(Bin) ->
+            {module, Mod} = code:load_binary(Mod, File, Bin),
+            {ok, Mod};
+        {error, Errors, _} ->
+            {error, Errors}
+    end.
