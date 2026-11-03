@@ -120,8 +120,10 @@ all their foreign keys inline, so they need a hand-written migration.
 `indexes/0` entries are matched to the migration history by columns and
 options (`unique`, `where`, `using`, `opclass`, `with`). `concurrently`
 is how an index is built, not part of it, so it is not compared, but a new
-index is generated with it. A `name` must be a non-empty binary, or the run
-aborts with `invalid_index_name`. A declared name matches only the index of
+index is generated with it. A `name` must be a binary of 1 to 63 bytes, or
+the run aborts with `invalid_index_name`. Index names are per Postgres
+schema, so two entries that resolve to the same name, declared or
+generated, in any tables, abort with `duplicate_index_name`. A declared name matches only the index of
 that name, so changing it, or changing an option of a named index, drops
 the index and creates it again. Without a `name`, an index under the
 generated name is matched first, then any alike index whose name no other

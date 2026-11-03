@@ -103,18 +103,26 @@ build_db_state(MigModules) ->
 %% Convert schema modules to desired state (columns + indexes)
 -spec build_desired_state([module()]) -> db_state().
 build_desired_state(SchemaModules) ->
-    lists:foldl(
+    State = lists:foldl(
         fun desired_state_for/2,
-        #{columns => #{}, indexes => #{}, keys => #{}, unsupported => []},
+        #{columns => #{}, indexes => #{}, keys => #{}, unsupported => [], index_names => #{}},
         SchemaModules
-    ).
+    ),
+    maps:remove(index_names, State).
 
 %% A schema the generator can never express is refused on its own rather than
 %% aborting the run: one composite foreign key must not stop every other table
 %% in the application being checked for drift. Everything else is a mistake the
 %% author can fix, so it still aborts.
 desired_state_for(
-    Mod, #{columns := ColAcc, indexes := IdxAcc, keys := KeyAcc, unsupported := Unsup} = Acc
+    Mod,
+    #{
+        columns := ColAcc,
+        indexes := IdxAcc,
+        keys := KeyAcc,
+        unsupported := Unsup,
+        index_names := Claimed
+    } = Acc
 ) ->
     try
         Table = Mod:table(),
@@ -128,10 +136,12 @@ desired_state_for(
         Indexes = extract_indexes(Mod),
         ok = check_index_columns(Mod, Indexes, Enriched),
         ok = check_index_names(Mod, Indexes),
+        Names = [index_name(Table, Cols, Opts) || {Cols, Opts} <- normalize_indexes(Indexes)],
         Acc#{
             columns => ColAcc#{Table => Enriched},
             indexes => IdxAcc#{Table => Indexes},
-            keys => KeyAcc#{Table => Key}
+            keys => KeyAcc#{Table => Key},
+            index_names => claim_index_names(Mod, Names, Claimed)
         }
     catch
         error:{kura_schema_diff, {composite_assoc_unsupported, _, _} = Reason} ->
@@ -183,16 +193,24 @@ check_index_columns(Mod, Indexes, Columns) ->
         [Col | _] -> error({kura_schema_diff, {index_unknown_column, Mod, Col}})
     end.
 
-%% Same rule as kura's migrator: a name that is not a non-empty binary is
-%% refused rather than replaced by the generated one.
 check_index_names(Mod, Indexes) ->
     Invalid = [
         N
-     || {_, Opts} <- normalize_indexes(Indexes), #{name := N} <- [Opts], not is_named(Opts)
+     || {_, Opts} <- normalize_indexes(Indexes), #{name := N} <- [Opts], not valid_index_name(N)
     ],
     case Invalid of
         [] -> ok;
         [Name | _] -> error({kura_schema_diff, {invalid_index_name, Mod, Name}})
+    end.
+
+valid_index_name(Name) ->
+    is_binary(Name) andalso byte_size(Name) > 0 andalso byte_size(Name) =< 63.
+
+%% Index names are per Postgres schema, so across tables too.
+claim_index_names(Mod, Names, Claimed) ->
+    case [N || N <- Names, is_map_key(N, Claimed)] ++ (Names -- lists:usort(Names)) of
+        [] -> maps:merge(Claimed, maps:from_keys(Names, Mod));
+        [Name | _] -> error({kura_schema_diff, {duplicate_index_name, Mod, Name}})
     end.
 
 -spec extract_indexes(module()) -> [index_entry()].
@@ -586,7 +604,12 @@ format_error({index_unknown_column, Mod, Col}) ->
     );
 format_error({invalid_index_name, Mod, Name}) ->
     io_lib:format(
-        "~s: indexes/0 declares index name ~0p, which is not a non-empty binary",
+        "~s: indexes/0 declares index name ~0p, which is not a binary of 1 to 63 bytes",
+        [Mod, Name]
+    );
+format_error({duplicate_index_name, Mod, Name}) ->
+    io_lib:format(
+        "~s: indexes/0 declares index name ~0p, which another index already takes",
         [Mod, Name]
     );
 format_error({composite_assoc_unsupported, Mod, Name}) ->
@@ -669,13 +692,13 @@ apply_ops([{create_index, Table, Columns, Opts} | Rest], #{indexes := IdxState} 
     apply_ops(Rest, State#{indexes => IdxState#{Table => TableIdx ++ [Entry]}});
 apply_ops([{create_index, Name, Table, Columns, Opts} | Rest], #{indexes := IdxState} = State) ->
     TableIdx = maps:get(Table, IdxState, []),
-    OptsMap = (proplist_to_map(Opts))#{name => Name},
+    OptsMap = (proplist_to_map(Opts))#{name => built_index_name(Name)},
     Entry = {Columns, OptsMap},
     apply_ops(Rest, State#{indexes => IdxState#{Table => TableIdx ++ [Entry]}});
 apply_ops([{drop_index, IdxName} | Rest], #{indexes := IdxState} = State) ->
     NewIdxState = maps:map(
         fun(Table, Entries) ->
-            [E || E <- Entries, entry_name(Table, E) =/= IdxName]
+            [E || E <- Entries, entry_name(Table, E) =/= built_index_name(IdxName)]
         end,
         IdxState
     ),
@@ -684,6 +707,10 @@ apply_ops([{execute, SQL} | Rest], State) ->
     apply_ops(Rest, replay_execute(SQL, State));
 apply_ops([_Other | Rest], State) ->
     apply_ops(Rest, State).
+
+%% kura writes an atom name into the SQL as its text.
+built_index_name(Name) when is_atom(Name) -> atom_to_binary(Name);
+built_index_name(Name) -> Name.
 
 -spec with_primary_key([#kura_column{}], [atom()]) -> [#kura_column{}].
 with_primary_key(Cols, Key) ->
