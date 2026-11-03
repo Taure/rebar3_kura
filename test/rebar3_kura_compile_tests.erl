@@ -264,6 +264,16 @@ extension_hint_is_a_commented_first_op_test() ->
     ),
     ?assertEqual(nomatch, binary:match(Plain, ~"EXTENSION")).
 
+extension_hint_refuses_a_name_that_could_leave_the_comment_test_() ->
+    Ops = [{drop_table, ~"t"}],
+    [
+        ?_assertError(
+            {invalid_extension_name, Name},
+            rebar3_kura_compile:render_migration("m_test_bad_ext", Ops, Ops, [Name])
+        )
+     || Name <- [~"x\ny", ~"x\"", ~"Vector", ~"", ~"a b"]
+    ].
+
 generated_source_round_trips_index_options_test() ->
     UpOps = [
         {create_index, ~"m", [e], #{

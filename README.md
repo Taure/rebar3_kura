@@ -264,7 +264,9 @@ has ever had a vector column or a replayed `execute` creates the extension.
 Uncomment it unless the extension is missing and the app's role cannot create
 it: pgvector is not a trusted extension, so creating it takes a superuser,
 but where the cluster's bootstrap already installed it the statement is a
-no-op for any role. `down/0` does not drop it. The hint is a comment because
+no-op for any role. Where roles you do not trust can create objects in a
+schema on the `search_path`, add `SCHEMA <name>` to the statement so the
+extension's objects land where you mean. `down/0` does not drop it. The hint is a comment because
 the generator does not know the app's backend, and the statement is
 PostgreSQL only.
 

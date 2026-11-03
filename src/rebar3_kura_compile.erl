@@ -301,14 +301,24 @@ render_up_ops(Ops, Extensions) ->
         "[%% On PostgreSQL these column types need an extension. Uncomment unless\n"
         "     %% it is missing and this role cannot create it (pgvector takes a\n"
         "     %% superuser); where it exists this is a no-op for any role.\n",
-        [
-            ["     %% {execute, ", sigil(<<"CREATE EXTENSION IF NOT EXISTS ", E/binary>>), "},\n"]
-         || E <- Extensions
-        ],
+        [extension_hint(E) || E <- Extensions],
         "     ",
         op_list(Ops),
         "]"
     ].
+
+%% Written into a comment, where a newline would end it.
+extension_hint(Name) ->
+    case re:run(Name, ~"\\A[a-z_][a-z0-9_]*\\z", [{capture, none}]) of
+        match ->
+            [
+                "     %% {execute, ",
+                sigil(<<"CREATE EXTENSION IF NOT EXISTS ", Name/binary>>),
+                "},\n"
+            ];
+        nomatch ->
+            error({invalid_extension_name, Name})
+    end.
 
 render_ops(Ops) ->
     ["[", op_list(Ops), "]"].
