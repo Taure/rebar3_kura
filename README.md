@@ -97,9 +97,9 @@ $ rebar3 kura lint_migrations --warn   # report only, always exit 0
 
 Honours each migration's optional `safe/0` callback as a per-operation opt-out.
 
-### `rebar3 kura gen_auth`
+### `rebar3 kura gen_auth` (deprecated)
 
-Generates authentication schema and migration scaffolding for a new project.
+Deprecated: gen_auth now belongs to [rebar3_nova](https://github.com/novaframework/rebar3_nova). Use `rebar3 nova gen_auth`, which targets [nova_auth](https://github.com/novaframework/nova_auth) 0.3. `rebar3 kura gen_auth` prints a deprecation warning and still generates the same authentication schema and migration scaffolding as before; it will be removed in a future release.
 
 ## Auto-migration
 

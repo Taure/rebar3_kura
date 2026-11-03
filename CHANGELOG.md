@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Deprecated
+
+- `rebar3 kura gen_auth` prints a deprecation warning. gen_auth now belongs to rebar3_nova: use `rebar3 nova gen_auth`, which targets nova_auth 0.3. `rebar3 kura gen_auth` still generates the same files as before and will be removed in a future release
+
 ### Added
 
 - `gen_schemas` reads a pgvector column's dimension, so `vector(N)` becomes `{vector, N}` instead of a bare `vector`, and `vector(N)[]` becomes `{array, {vector, N}}`
