@@ -136,3 +136,149 @@ unload(Mod) ->
     ok = kura_schema:forget(Mod),
     code:purge(Mod),
     code:delete(Mod).
+
+%%====================================================================
+%% Generated user changesets: secrets, email identity, password length
+%%====================================================================
+
+user_changeset_test_() ->
+    {setup,
+        fun() ->
+            {User, Token} = load_schemas(),
+            meck:new(nova_auth_password, [non_strict]),
+            meck:expect(nova_auth_password, hash, fun(P) -> <<"hashed:", P/binary>> end),
+            {User, Token}
+        end,
+        fun({User, Token}) ->
+            meck:unload(nova_auth_password),
+            unload(User),
+            unload(Token)
+        end,
+        fun({User, _Token}) ->
+            [
+                {"valid registration keeps no plaintext", ?_test(no_plaintext_valid(User))},
+                {"invalid registration keeps no plaintext", ?_test(no_plaintext_invalid(User))},
+                {"password change keeps no plaintext", ?_test(no_plaintext_password_change(User))},
+                {"email case folds to one address", ?_test(email_case_folds(User))},
+                {"trailing newline is not an email", ?_test(email_trailing_newline(User))},
+                {"invalid UTF-8 email is an error", ?_test(email_invalid_utf8(User))},
+                {"email change resets confirmed_at", ?_test(email_change_unconfirms(User))},
+                {"same email keeps confirmed_at", ?_test(same_email_keeps_confirmed(User))},
+                {"password length counts characters", ?_test(password_counts_characters(User))},
+                {"password longer than 1024 is refused", ?_test(password_max(User))},
+                {"invalid UTF-8 password is an error", ?_test(password_invalid_utf8(User))}
+            ]
+        end}.
+
+registration(User, Email, Password, Confirmation) ->
+    User:registration_changeset(#{}, #{
+        ~"email" => Email, ~"password" => Password, ~"password_confirmation" => Confirmation
+    }).
+
+assert_no_plaintext(#kura_changeset{changes = Changes, params = Params}) ->
+    Secret = [password, password_confirmation, ~"password", ~"password_confirmation"],
+    ?assertEqual([], [K || K <- Secret, maps:is_key(K, Changes)]),
+    ?assertEqual([], [K || K <- Secret, maps:is_key(K, Params)]).
+
+no_plaintext_valid(User) ->
+    CS = registration(User, ~"a@example.com", ~"correct horse battery", ~"correct horse battery"),
+    ?assert(CS#kura_changeset.valid),
+    assert_no_plaintext(CS).
+
+no_plaintext_invalid(User) ->
+    Mismatch = registration(User, ~"a@example.com", ~"correct horse battery", ~"other"),
+    ?assertNot(Mismatch#kura_changeset.valid),
+    assert_no_plaintext(Mismatch),
+    Short = registration(User, ~"not an email", ~"short", ~"short"),
+    ?assertNot(Short#kura_changeset.valid),
+    assert_no_plaintext(Short).
+
+no_plaintext_password_change(User) ->
+    Data = #{id => 1, email => ~"a@example.com"},
+    CS = User:password_changeset(Data, #{
+        ~"password" => ~"a new long passphrase",
+        ~"password_confirmation" => ~"a new long passphrase"
+    }),
+    ?assert(CS#kura_changeset.valid),
+    ?assertEqual(
+        ~"hashed:a new long passphrase", kura_changeset:get_change(CS, hashed_password)
+    ),
+    assert_no_plaintext(CS).
+
+email_case_folds(User) ->
+    Pass = ~"correct horse battery",
+    Victim = registration(User, ~"victim@b.com", Pass, Pass),
+    Attacker = registration(User, ~"Victim@B.com", Pass, Pass),
+    ?assertEqual(~"victim@b.com", kura_changeset:get_change(Attacker, email)),
+    ?assertEqual(
+        kura_changeset:get_change(Victim, email), kura_changeset:get_change(Attacker, email)
+    ),
+    ?assertMatch(
+        [_ | _], [
+            C
+         || #kura_constraint{type = unique, field = email} = C <-
+                Attacker#kura_changeset.constraints
+        ]
+    ),
+    ?assertEqual({ok, ~"victim@b.com"}, User:normalize_email(~"VICTIM@b.COM")).
+
+email_trailing_newline(User) ->
+    Pass = ~"correct horse battery",
+    CS = registration(User, ~"victim@b.com\n", Pass, Pass),
+    ?assertNot(CS#kura_changeset.valid),
+    ?assertMatch([{email, _}], CS#kura_changeset.errors).
+
+email_invalid_utf8(User) ->
+    Pass = ~"correct horse battery",
+    CS = registration(User, <<255, "@b.com">>, Pass, Pass),
+    ?assertNot(CS#kura_changeset.valid),
+    ?assertEqual([{email, ~"is not valid UTF-8"}], CS#kura_changeset.errors),
+    ?assertEqual(error, User:normalize_email(<<255, "@b.com">>)).
+
+email_change_unconfirms(User) ->
+    Data = #{id => 1, email => ~"old@b.com", confirmed_at => {{2026, 1, 1}, {0, 0, 0}}},
+    CS = User:email_changeset(Data, #{~"email" => ~"New@B.com"}),
+    ?assert(CS#kura_changeset.valid),
+    ?assertEqual(~"new@b.com", kura_changeset:get_change(CS, email)),
+    ?assertEqual(#{email => ~"new@b.com", confirmed_at => undefined}, CS#kura_changeset.changes).
+
+same_email_keeps_confirmed(User) ->
+    Data = #{id => 1, email => ~"old@b.com", confirmed_at => {{2026, 1, 1}, {0, 0, 0}}},
+    CS = User:email_changeset(Data, #{~"email" => ~"OLD@b.com"}),
+    ?assertEqual(#{}, CS#kura_changeset.changes).
+
+password_counts_characters(User) ->
+    Emoji = <<16#1F600/utf8, 16#1F601/utf8, 16#1F602/utf8, 16#1F603/utf8>>,
+    ?assertEqual(16, byte_size(Emoji)),
+    Short = registration(User, ~"a@b.com", Emoji, Emoji),
+    ?assertEqual([{password, ~"should be at least 12 character(s)"}], Short#kura_changeset.errors),
+    Japanese = <<<<16#3042/utf8>> || _ <- lists:seq(1, 40)>>,
+    Long = registration(User, ~"a@b.com", Japanese, Japanese),
+    ?assert(Long#kura_changeset.valid).
+
+password_max(User) ->
+    TooLong = binary:copy(~"a", 1025),
+    CS = registration(User, ~"a@b.com", TooLong, TooLong),
+    ?assertEqual([{password, ~"should be at most 1024 character(s)"}], CS#kura_changeset.errors),
+    Max = binary:copy(~"a", 1024),
+    ?assert((registration(User, ~"a@b.com", Max, Max))#kura_changeset.valid).
+
+password_invalid_utf8(User) ->
+    Bad = <<"correct horse ", 255>>,
+    CS = registration(User, ~"a@b.com", Bad, Bad),
+    ?assertEqual([{password, ~"is not valid UTF-8"}], CS#kura_changeset.errors).
+
+instructions_cover_confirmation_and_normalised_login_test() ->
+    Text = rebar3_kura_gen_auth:instructions("ga"),
+    [
+        ?assertNotEqual(nomatch, string:find(Text, Needle))
+     || Needle <- [
+            "rebar3 kura compile",
+            "nova_auth_confirm:generate_confirm_token(ga_auth, User)",
+            "nova_auth_confirm:confirm_user(ga_auth, Token)",
+            "ga_user:normalize_email(RawEmail)",
+            "confirmed_at",
+            "{nova_auth, \"~> 0.2\"}"
+        ]
+    ],
+    ?assertEqual(nomatch, string:find(Text, "APP")).
