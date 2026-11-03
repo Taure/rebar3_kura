@@ -303,16 +303,27 @@ is_execute_op({execute, _}) -> true;
 is_execute_op(_) -> false.
 
 %% erlfmt is not a dependency of this plugin. A project that formats with it
-%% loads it as a project plugin, and that copy, with the project's own
-%% print width and pragma setting, is the one `rebar3 fmt --check` holds
-%% generated files to. Looked up before ensure_code_path/1 adds every
-%% dependency's ebin, so an erlfmt that is only some dependency's dependency
-%% is not used. Without one the source is written as rendered.
+%% lists it in project_plugins (or plugins), and that copy, with the
+%% project's own print width and pragma setting, is the one
+%% `rebar3 fmt --check` holds generated files to. An erlfmt that is only a
+%% dependency is not the project's formatter and is not used, even though it
+%% is on the code path. rebar3 does not always load a plugin's modules up
+%% front, so being configured is the test, not being loaded. Without it the
+%% source is written as rendered.
+-spec erlfmt_opts(term()) -> none | [fmt_opt()].
 erlfmt_opts(State) ->
-    case code:ensure_loaded(erlfmt) of
-        {module, erlfmt} -> erlfmt_config(rebar_state:get(State, erlfmt, []));
-        {error, _} -> none
+    case erlfmt_plugin(State) andalso code:ensure_loaded(erlfmt) =:= {module, erlfmt} of
+        true -> erlfmt_config(rebar_state:get(State, erlfmt, []));
+        false -> none
     end.
+
+erlfmt_plugin(State) ->
+    Plugins = rebar_state:get(State, project_plugins, []) ++ rebar_state:get(State, plugins, []),
+    lists:any(fun(P) -> plugin_name(P) =:= erlfmt end, Plugins).
+
+plugin_name(Name) when is_atom(Name) -> Name;
+plugin_name(Plugin) when is_tuple(Plugin), tuple_size(Plugin) >= 1 -> element(1, Plugin);
+plugin_name(_) -> undefined.
 
 -spec erlfmt_config(term()) -> [fmt_opt()].
 erlfmt_config(Config) when is_list(Config) ->
