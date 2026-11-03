@@ -236,6 +236,42 @@ assert_round_trip(Text) ->
         cleanup_mod(Mod)
     end.
 
+extension_hint_is_a_commented_first_op_test() ->
+    UpOps = [{create_table, ~"items", [#kura_column{name = e, type = {vector, 3}}]}],
+    DownOps = [{drop_table, ~"items"}],
+    Source = iolist_to_binary(
+        rebar3_kura_compile:render_migration("m_test_hint", UpOps, DownOps, [~"vector"])
+    ),
+    Extension = {execute, ~"CREATE EXTENSION IF NOT EXISTS vector"},
+    {ok, Mod} = compile_source("m_test_hint", Source),
+    try
+        ?assertEqual(UpOps, Mod:up()),
+        ?assertEqual(DownOps, Mod:down())
+    after
+        cleanup_mod(Mod)
+    end,
+    Uncommented = binary:replace(Source, ~"%% {execute,", ~"{execute,"),
+    {ok, Mod2} = compile_source("m_test_hint", Uncommented),
+    try
+        ?assertEqual([Extension | UpOps], Mod2:up())
+    after
+        cleanup_mod(Mod2)
+    end,
+    Plain = iolist_to_binary(
+        rebar3_kura_compile:render_migration("m_test_hint", UpOps, DownOps, [])
+    ),
+    ?assertEqual(nomatch, binary:match(Plain, ~"EXTENSION")).
+
+extension_hint_refuses_a_name_that_could_leave_the_comment_test_() ->
+    Ops = [{drop_table, ~"t"}],
+    [
+        ?_assertError(
+            {invalid_extension_name, Name},
+            rebar3_kura_compile:render_migration("m_test_bad_ext", Ops, Ops, [Name])
+        )
+     || Name <- [~"x\ny", ~"x\"", ~"Vector", ~"", ~"a b"]
+    ].
+
 generated_source_round_trips_index_options_test() ->
     UpOps = [
         {create_index, ~"m", [e], #{
@@ -260,7 +296,9 @@ generated_source_round_trips_index_options_test() ->
 
 compile_generated_migration(Desc, UpOps, DownOps) ->
     ModName = "m_test_" ++ Desc,
-    Source = rebar3_kura_compile:render_migration(ModName, UpOps, DownOps),
+    compile_source(ModName, rebar3_kura_compile:render_migration(ModName, UpOps, DownOps, [])).
+
+compile_source(ModName, Source) ->
     Dir = make_temp_dir(),
     File = filename:join(Dir, ModName ++ ".erl"),
     ok = file:write_file(File, Source),

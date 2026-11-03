@@ -8,6 +8,7 @@
     diff/2,
     field_to_column/1,
     format_error/1,
+    required_extensions/2,
     unreplayed_executes/1,
     unsupported_schemas/1
 ]).
@@ -40,6 +41,9 @@
     "\\s+)?PRIMARY\\s+KEY\\s*\\((.+)\\)$"
 >>).
 -define(IDENT_LIST_RE, <<"(?s)^\\s*", ?IDENT, "\\s*(?:,(.+))?$">>).
+-define(CREATE_EXTENSION_RE,
+    <<"(?is)^CREATE\\s+EXTENSION\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?", ?IDENT, "(?:\\s.*)?$">>
+).
 -define(DROP_CONSTRAINT_RE,
     <<"(?is)^ALTER\\s+TABLE\\s+", ?IDENT, "\\s+DROP\\s+CONSTRAINT\\s+", ?IDENT, "$">>
 ).
@@ -56,7 +60,8 @@
     fk_unowned => #{fk_key() => true},
     pk_names => #{binary() => binary()},
     keys => #{binary() => [atom()]},
-    unreplayed => [binary()]
+    unreplayed => [binary()],
+    extensions => #{binary() => true}
 }.
 -type operation() ::
     {create_table, binary(), [#kura_column{}]}
@@ -87,9 +92,10 @@ build_db_state(MigModules) ->
     lists:foldl(
         fun(Mod, Acc) ->
             Ops = Mod:up(),
-            apply_ops(Ops, Acc)
+            note_extensions(apply_ops(Ops, Acc))
         end,
         #{
+            extensions => #{},
             columns => #{},
             indexes => #{},
             fk_names => #{},
@@ -183,6 +189,41 @@ unique or check constraint is listed too, rendered as the clause it adds.
 -spec unreplayed_executes(db_state()) -> [binary()].
 unreplayed_executes(State) ->
     maps:get(unreplayed, State, []).
+
+-doc """
+The extensions the column types `UpOps` add need, such as `vector` for a
+pgvector column, less those the history already needs or creates: a replayed
+table once had a column of such a type, or a replayed `execute` runs
+`CREATE EXTENSION`.
+""".
+-spec required_extensions(db_state(), [operation()]) -> [binary()].
+required_extensions(DbState, UpOps) ->
+    Known = maps:get(extensions, DbState, #{}),
+    [E || E <- type_extensions(added_types(UpOps)), not is_map_key(E, Known)].
+
+added_types(Ops) ->
+    [C#kura_column.type || {create_table, _, Cols} <- Ops, C <- Cols] ++
+        [C#kura_column.type || {create_table, _, Cols, _} <- Ops, C <- Cols] ++
+        [
+            Type
+         || {alter_table, _, AlterOps} <- Ops,
+            Type <-
+                [C#kura_column.type || {add_column, C} <- AlterOps] ++
+                    [T || {modify_column, _, T} <- AlterOps]
+        ].
+
+%% One-way, so dropping the last such column does not ask for it again.
+note_extensions(#{columns := Cols} = State) ->
+    Seen = type_extensions([C#kura_column.type || Table <- maps:values(Cols), C <- Table]),
+    State#{extensions => maps:merge(maps:get(extensions, State, #{}), maps:from_keys(Seen, true))}.
+
+type_extensions(Types) ->
+    lists:usort([E || T <- Types, E <- [extension_for(T)], E =/= none]).
+
+extension_for(vector) -> ~"vector";
+extension_for({vector, _}) -> ~"vector";
+extension_for({array, Inner}) -> extension_for(Inner);
+extension_for(_) -> none.
 
 %% Otherwise dropping a field emits drop_column and the index declared on it
 %% comes back as a create_index on a column that no longer exists.
@@ -1297,7 +1338,17 @@ replay_pk_add(Stmt, State) ->
 replay_constraint_drop(Stmt, State) ->
     case captures(Stmt, ?DROP_CONSTRAINT_RE, 4) of
         {match, [TQ, TB, NQ, NB]} -> drop_constraint(ident(TQ, TB), ident(NQ, NB), State);
-        nomatch -> nomatch
+        nomatch -> replay_create_extension(Stmt, State)
+    end.
+
+-spec replay_create_extension(binary(), db_state()) -> {ok, db_state()} | nomatch.
+replay_create_extension(Stmt, State) ->
+    case captures(Stmt, ?CREATE_EXTENSION_RE, 2) of
+        {match, [Q, B]} ->
+            Known = maps:get(extensions, State, #{}),
+            {ok, State#{extensions => Known#{ident(Q, B) => true}}};
+        nomatch ->
+            nomatch
     end.
 
 -spec drop_constraint(binary(), binary(), db_state()) -> {ok, db_state()} | nomatch.

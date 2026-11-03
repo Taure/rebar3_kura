@@ -80,10 +80,11 @@ column_row_follows_select_order_test() ->
         udt_name => <<"varchar">>,
         character_maximum_length => 255,
         is_nullable => <<"NO">>,
-        column_default => null
+        column_default => null,
+        atttypmod => 259
     },
     ?assertEqual(
-        {<<"users">>, <<"email">>, <<"varchar">>, 255, <<"NO">>, null},
+        {<<"users">>, <<"email">>, <<"varchar">>, 255, <<"NO">>, null, 259},
         rebar3_kura_gen_schemas:column_row(Row)
     ).
 
