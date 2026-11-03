@@ -210,7 +210,7 @@ build_desired_state_test() ->
 
 build_desired_state_empty_test() ->
     ?assertEqual(
-        #{columns => #{}, indexes => #{}, unsupported => []},
+        #{columns => #{}, indexes => #{}, keys => #{}, unsupported => []},
         kura_schema_diff:build_desired_state([])
     ).
 
@@ -907,8 +907,8 @@ diff_drop_column_drops_its_index_first_test() ->
     ?assertMatch(
         [
             {alter_table, ~"t", [{add_column, #kura_column{name = x}}]},
-            {create_index, ~"t", [x], _},
-            {create_index, ~"t", [id], _}
+            {create_index, ~"t", [id], _},
+            {create_index, ~"t", [x], _}
         ],
         Down
     ).
@@ -1069,7 +1069,7 @@ diff_new_table_index_down_is_only_the_drop_table_test() ->
     ),
     %% The down is the two table drops and nothing else.
     ?assertEqual(
-        [{drop_table, <<"quest_progress">>}, {drop_table, <<"quests">>}],
+        [{drop_table, <<"quests">>}, {drop_table, <<"quest_progress">>}],
         Down
     ),
 
@@ -1967,10 +1967,13 @@ index_where_match_treats_the_column_name_literally_test() ->
     ]),
     ?assertMatch([{[a], _}], maps:get(~"t", idxs(State))).
 
-diff_does_not_drop_not_null_from_a_demoted_primary_key_test() ->
+diff_refuses_rather_than_drop_not_null_from_a_demoted_primary_key_test() ->
     Db = #{~"t" => [#kura_column{name = id, type = id, primary_key = true}]},
     Desired = #{~"t" => [#kura_column{name = id, type = id}]},
-    ?assertEqual({[], []}, kura_schema_diff:diff(Db, Desired)).
+    ?assertError(
+        {kura_schema_diff, {primary_key_changed, ~"t", id, false, ~"t_pkey"}},
+        kura_schema_diff:diff(Db, Desired)
+    ).
 
 diff_parts(Db, Desired) ->
     {Up, Down} = kura_schema_diff:diff(Db, Desired),
@@ -2162,3 +2165,654 @@ diff_recreates_an_index_named_as_generated_without_its_name_test() ->
         {[{drop_index, ~"t_a_index"}], [{create_index, ~"t", [a], #{unique => true}}]},
         kura_schema_diff:diff(State, Desired)
     ).
+
+%%====================================================================
+%% down/0 undoes up/0 in reverse (Taure/rebar3_kura#41)
+%%====================================================================
+
+new_authors_table() ->
+    [#kura_column{name = id, type = id, primary_key = true}].
+
+diff_down_drops_a_new_reference_column_before_its_table_test() ->
+    Db = #{~"posts" => [#kura_column{name = id, type = id, primary_key = true}]},
+    AuthorId = #kura_column{name = author_id, type = integer, references = {~"authors", id}},
+    Desired = #{
+        ~"authors" => new_authors_table(),
+        ~"posts" => [#kura_column{name = id, type = id, primary_key = true}, AuthorId]
+    },
+    {Up, Down} = kura_schema_diff:diff(Db, Desired),
+    ?assertEqual(
+        [
+            {create_table, ~"authors", new_authors_table()},
+            {alter_table, ~"posts", [{add_column, AuthorId}]}
+        ],
+        Up
+    ),
+    ?assertEqual(
+        [{alter_table, ~"posts", [{drop_column, author_id}]}, {drop_table, ~"authors"}],
+        Down
+    ).
+
+diff_down_drops_a_new_foreign_key_before_its_table_test() ->
+    Db = #{
+        ~"posts" => [
+            #kura_column{name = id, type = id, primary_key = true},
+            #kura_column{name = author_id, type = integer}
+        ]
+    },
+    Desired = #{
+        ~"authors" => new_authors_table(),
+        ~"posts" => [
+            #kura_column{name = id, type = id, primary_key = true},
+            #kura_column{name = author_id, type = integer, references = {~"authors", id}}
+        ]
+    },
+    {_Up, Down} = kura_schema_diff:diff(Db, Desired),
+    ?assertEqual(
+        [
+            {execute, ~"ALTER TABLE \"posts\" DROP CONSTRAINT \"posts_author_id_fkey\""},
+            {drop_table, ~"authors"}
+        ],
+        Down
+    ).
+
+diff_down_drops_a_referencing_new_table_first_test() ->
+    Desired = #{
+        ~"authors" => new_authors_table(),
+        ~"books" => [
+            #kura_column{name = id, type = id, primary_key = true},
+            #kura_column{name = author_id, type = integer, references = {~"authors", id}}
+        ],
+        ~"zines" => [#kura_column{name = id, type = id, primary_key = true}]
+    },
+    {_Up, Down} = kura_schema_diff:diff(#{}, Desired),
+    ?assertEqual(
+        [{drop_table, ~"books"}, {drop_table, ~"zines"}, {drop_table, ~"authors"}],
+        Down
+    ).
+
+diff_down_drops_a_self_referencing_new_table_test() ->
+    Desired = #{
+        ~"nodes" => [
+            #kura_column{name = id, type = id, primary_key = true},
+            #kura_column{name = parent_id, type = integer, references = {~"nodes", id}}
+        ]
+    },
+    ?assertMatch({_, [{drop_table, ~"nodes"}]}, kura_schema_diff:diff(#{}, Desired)).
+
+diff_up_creates_a_referenced_new_table_first_test() ->
+    Posts = [#kura_column{name = user_id, type = integer, references = {~"users", id}}],
+    Desired = #{~"posts" => Posts, ~"users" => new_authors_table()},
+    ?assertEqual(
+        {
+            [{create_table, ~"users", new_authors_table()}, {create_table, ~"posts", Posts}],
+            [{drop_table, ~"posts"}, {drop_table, ~"users"}]
+        },
+        kura_schema_diff:diff(#{}, Desired)
+    ).
+
+diff_refuses_new_tables_that_reference_each_other_test() ->
+    Desired = #{
+        ~"a" => [#kura_column{name = b_id, type = integer, references = {~"b", id}}],
+        ~"b" => [#kura_column{name = a_id, type = integer, references = {~"a", id}}],
+        ~"c" => [#kura_column{name = a_id, type = integer, references = {~"a", id}}],
+        ~"d" => new_authors_table()
+    },
+    ?assertError(
+        {kura_schema_diff, {reference_cycle, [~"a", ~"b"]}}, kura_schema_diff:diff(#{}, Desired)
+    ).
+
+format_error_reference_cycle_test() ->
+    Msg = lists:flatten(kura_schema_diff:format_error({reference_cycle, [~"a", ~"b"]})),
+    ?assertNotEqual(nomatch, string:find(Msg, "\"a\", \"b\"")),
+    ?assertNotEqual(nomatch, string:find(Msg, "hand-written migration")).
+
+%%====================================================================
+%% Replay of create_table/4 (Taure/rebar3_kura#52)
+%%====================================================================
+
+replay_create_table_with_constraints_test() ->
+    State = replay([
+        {create_table, ~"t",
+            [#kura_column{name = id, type = id}, #kura_column{name = a, type = string}], [
+                {primary_key, [id]}
+            ]}
+    ]),
+    Desired = #{
+        ~"t" => [
+            #kura_column{name = id, type = id, primary_key = true},
+            #kura_column{name = a, type = string}
+        ]
+    },
+    ?assertEqual({[], []}, kura_schema_diff:diff(State, Desired)),
+    ?assertEqual([], kura_schema_diff:unreplayed_executes(State)).
+
+replay_create_table_composite_primary_key_test() ->
+    State = replay([
+        {create_table, ~"t",
+            [
+                #kura_column{name = a, type = integer},
+                #kura_column{name = b, type = integer},
+                #kura_column{name = c, type = string}
+            ],
+            [{primary_key, [a, b]}]}
+    ]),
+    ?assertEqual(
+        [true, true, false],
+        [C#kura_column.primary_key || C <- maps:get(~"t", cols(State))]
+    ).
+
+replay_create_table_notes_constraints_it_cannot_model_test() ->
+    State = replay([
+        {create_table, ~"t",
+            [#kura_column{name = a, type = string}, #kura_column{name = b, type = integer}], [
+                {unique, [a, b]}, {check, ~"b > 0"}, {unique, [b]}
+            ]}
+    ]),
+    ?assertEqual(
+        [~"CREATE TABLE \"t\" (... UNIQUE (\"a\", \"b\"), UNIQUE (\"b\"))"],
+        kura_schema_diff:unreplayed_executes(State)
+    ),
+    ?assertEqual([a, b], [C#kura_column.name || C <- maps:get(~"t", cols(State))]).
+
+replay_create_table_without_constraints_test() ->
+    State = replay([{create_table, ~"t", [#kura_column{name = a, type = string}], []}]),
+    ?assertEqual(#{~"t" => [#kura_column{name = a, type = string}]}, cols(State)),
+    ?assertEqual([], kura_schema_diff:unreplayed_executes(State)).
+
+%%====================================================================
+%% Primary key changes are refused (Taure/rebar3_kura#53)
+%%====================================================================
+
+keyed_on(Key) ->
+    [
+        #kura_column{name = id, type = id, primary_key = Key =:= id, nullable = false},
+        #kura_column{name = uuid, type = uuid, primary_key = Key =:= uuid, nullable = false}
+    ].
+
+diff_refuses_a_column_leaving_the_primary_key_test() ->
+    ?assertError(
+        {kura_schema_diff, {primary_key_changed, ~"t", id, false, ~"t_pkey"}},
+        kura_schema_diff:diff(#{~"t" => keyed_on(id)}, #{~"t" => keyed_on(none)})
+    ).
+
+diff_refuses_a_column_joining_the_primary_key_test() ->
+    ?assertError(
+        {kura_schema_diff, {primary_key_changed, ~"t", uuid, true, ~"t_pkey"}},
+        kura_schema_diff:diff(#{~"t" => keyed_on(none)}, #{~"t" => keyed_on(uuid)})
+    ).
+
+diff_refuses_a_moved_primary_key_test() ->
+    ?assertError(
+        {kura_schema_diff, {primary_key_changed, ~"t", id, false, ~"t_pkey"}},
+        kura_schema_diff:diff(#{~"t" => keyed_on(id)}, #{~"t" => keyed_on(uuid)})
+    ).
+
+format_error_primary_key_changed_test() ->
+    Joined = lists:flatten(
+        kura_schema_diff:format_error({primary_key_changed, ~"t", uuid, true, ~"t_key"})
+    ),
+    ?assertNotEqual(nomatch, string:find(Joined, "table \"t\"")),
+    ?assertNotEqual(nomatch, string:find(Joined, "adds column 'uuid' to the primary key")),
+    ?assertNotEqual(nomatch, string:find(Joined, "hand-written migration")),
+    ?assertNotEqual(nomatch, string:find(Joined, "DROP CONSTRAINT \\\"t_key\\\"")),
+    ?assertNotEqual(nomatch, string:find(Joined, "SQLite")),
+    Left = lists:flatten(
+        kura_schema_diff:format_error({primary_key_changed, ~"t", id, false, ~"t_pkey"})
+    ),
+    ?assertNotEqual(nomatch, string:find(Left, "takes column 'id' out of the primary key")).
+
+diff_refuses_a_new_key_column_on_an_existing_table_test() ->
+    Db = #{~"t" => [#kura_column{name = a, type = string}]},
+    Desired = #{
+        ~"t" => [
+            #kura_column{name = a, type = string},
+            #kura_column{name = id, type = id, primary_key = true}
+        ]
+    },
+    ?assertError(
+        {kura_schema_diff, {primary_key_changed, ~"t", id, true, ~"t_pkey"}},
+        kura_schema_diff:diff(Db, Desired)
+    ).
+
+diff_refuses_dropping_a_key_column_test() ->
+    Db = #{~"t" => keyed_on(id)},
+    Desired = #{~"t" => [#kura_column{name = uuid, type = uuid, nullable = false}]},
+    ?assertError(
+        {kura_schema_diff, {primary_key_changed, ~"t", id, false, ~"t_pkey"}},
+        kura_schema_diff:diff(Db, Desired)
+    ).
+
+diff_refusal_names_a_recorded_key_constraint_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = id, type = id, nullable = false}]},
+        {execute, ~"ALTER TABLE t ADD CONSTRAINT t_key PRIMARY KEY (id)"}
+    ]),
+    ?assertError(
+        {kura_schema_diff, {primary_key_changed, ~"t", id, false, ~"t_key"}},
+        kura_schema_diff:diff(State, #{~"t" => [#kura_column{name = id, type = id}]})
+    ).
+
+diff_refusal_names_the_truncated_key_constraint_test() ->
+    Long = binary:copy(~"a", 60),
+    Db = #{Long => [#kura_column{name = id, type = id, primary_key = true}]},
+    Expected = <<(binary:copy(~"a", 58))/binary, "_pkey">>,
+    ?assertError(
+        {kura_schema_diff, {primary_key_changed, Long, id, false, Expected}},
+        kura_schema_diff:diff(Db, #{Long => [#kura_column{name = id, type = id}]})
+    ).
+
+replay_drops_a_key_under_its_truncated_name_test() ->
+    Table = <<(binary:copy(~"a", 57))/binary, "é"/utf8, "b">>,
+    Constraint = <<(binary:copy(~"a", 57))/binary, "_pkey">>,
+    State = replay([
+        {create_table, Table, [#kura_column{name = id, type = id, primary_key = true}]},
+        {execute,
+            <<"ALTER TABLE \"", Table/binary, "\" DROP CONSTRAINT \"", Constraint/binary, "\"">>}
+    ]),
+    ?assertEqual([], kura_schema_diff:unreplayed_executes(State)),
+    ?assertEqual(false, (col(State, Table, id))#kura_column.primary_key).
+
+replay_table_rebuild_changes_the_key_on_any_backend_test() ->
+    Cols = [#kura_column{name = a, type = integer}, #kura_column{name = b, type = integer}],
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = id, type = id, primary_key = true} | Cols]},
+        {create_table, ~"t_rebuild", Cols, [{primary_key, [a, b]}]},
+        {execute, ~"INSERT INTO t_rebuild (a, b) SELECT a, b FROM t"},
+        {drop_table, ~"t"},
+        {create_table, ~"t", Cols, [{primary_key, [a, b]}]},
+        {execute, ~"INSERT INTO t (a, b) SELECT a, b FROM t_rebuild"},
+        {drop_table, ~"t_rebuild"}
+    ]),
+    Desired = #{
+        ~"t" => [
+            #kura_column{name = a, type = integer, primary_key = true},
+            #kura_column{name = b, type = integer, primary_key = true}
+        ]
+    },
+    ?assertEqual([], kura_schema_diff:unreplayed_executes(State)),
+    ?assertEqual({[], []}, kura_schema_diff:diff(State, Desired)).
+
+replay_hand_written_primary_key_move_test() ->
+    State = replay([
+        {create_table, ~"t", [
+            #kura_column{name = id, type = id, primary_key = true},
+            #kura_column{name = uuid, type = uuid, nullable = false}
+        ]},
+        {execute, ~"ALTER TABLE t DROP CONSTRAINT t_pkey"},
+        {execute, ~"ALTER TABLE \"t\" ADD PRIMARY KEY (\"uuid\")"}
+    ]),
+    ?assertEqual({[], []}, kura_schema_diff:diff(State, #{~"t" => keyed_on(uuid)})),
+    ?assertEqual([], kura_schema_diff:unreplayed_executes(State)).
+
+replay_dropped_primary_key_leaves_not_null_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = id, type = id, primary_key = true}]},
+        {execute, ~"ALTER TABLE t DROP CONSTRAINT t_pkey"}
+    ]),
+    ?assertEqual(
+        [#kura_column{name = id, type = id, primary_key = false, nullable = false}],
+        maps:get(~"t", cols(State))
+    ).
+
+replay_named_composite_primary_key_test() ->
+    State = replay([
+        {create_table, ~"t", [
+            #kura_column{name = a, type = integer},
+            #kura_column{name = b, type = integer},
+            #kura_column{name = c, type = integer}
+        ]},
+        {execute, ~"alter table t add constraint t_ab primary key (a, b);"}
+    ]),
+    ?assertEqual(
+        [true, true, false],
+        [C#kura_column.primary_key || C <- maps:get(~"t", cols(State))]
+    ),
+    Dropped = replay([
+        {create_table, ~"t", [#kura_column{name = a, type = integer}]},
+        {execute, ~"ALTER TABLE t ADD CONSTRAINT t_a PRIMARY KEY (a)"},
+        {execute, ~"ALTER TABLE t DROP CONSTRAINT t_pkey"},
+        {execute, ~"ALTER TABLE t DROP CONSTRAINT t_a"}
+    ]),
+    ?assertEqual(
+        [#kura_column{name = a, type = integer, nullable = false}],
+        maps:get(~"t", cols(Dropped))
+    ),
+    ?assertEqual(
+        [~"ALTER TABLE t DROP CONSTRAINT t_pkey"], kura_schema_diff:unreplayed_executes(Dropped)
+    ).
+
+replay_primary_key_on_an_unknown_column_is_noted_test() ->
+    Bad = [
+        ~"ALTER TABLE t ADD PRIMARY KEY (nope_not_a_column)",
+        ~"ALTER TABLE t ADD PRIMARY KEY (a, )",
+        ~"ALTER TABLE t ADD PRIMARY KEY USING INDEX t_a_index"
+    ],
+    lists:foreach(
+        fun(SQL) ->
+            State = replay([
+                {create_table, ~"t", [#kura_column{name = a, type = integer}]},
+                {execute, SQL}
+            ]),
+            ?assertEqual([SQL], kura_schema_diff:unreplayed_executes(State)),
+            ?assertEqual(
+                [#kura_column{name = a, type = integer}], maps:get(~"t", cols(State))
+            )
+        end,
+        Bad
+    ).
+
+replay_drop_table_forgets_a_custom_primary_key_name_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = a, type = integer}]},
+        {execute, ~"ALTER TABLE t ADD CONSTRAINT t_a PRIMARY KEY (a)"},
+        {drop_table, ~"t"},
+        {create_table, ~"t", [#kura_column{name = a, type = integer, primary_key = true}]},
+        {execute, ~"ALTER TABLE t DROP CONSTRAINT t_pkey"}
+    ]),
+    ?assertEqual([], kura_schema_diff:unreplayed_executes(State)).
+
+%%====================================================================
+%% Renaming a referenced column (Taure/rebar3_kura#54)
+%%====================================================================
+
+replay_rename_of_a_referenced_column_retargets_references_test() ->
+    State = replay([
+        {create_table, ~"users", [#kura_column{name = id, type = id, primary_key = true}]},
+        {create_table, ~"posts", [
+            #kura_column{name = user_id, type = integer, references = {~"users", id}}
+        ]},
+        {alter_table, ~"users", [{rename_column, id, user_id}]}
+    ]),
+    Desired = #{
+        ~"users" => [#kura_column{name = user_id, type = id, primary_key = true}],
+        ~"posts" => [
+            #kura_column{name = user_id, type = integer, references = {~"users", user_id}}
+        ]
+    },
+    ?assertEqual({[], []}, kura_schema_diff:diff(State, Desired)).
+
+replay_rename_retargets_a_self_reference_test() ->
+    State = replay([
+        {create_table, ~"nodes", [
+            #kura_column{name = id, type = id, primary_key = true},
+            #kura_column{name = parent_id, type = integer, references = {~"nodes", id}}
+        ]},
+        {alter_table, ~"nodes", [{rename_column, id, node_id}]}
+    ]),
+    ?assertEqual({~"nodes", node_id}, (col(State, ~"nodes", parent_id))#kura_column.references).
+
+replay_rename_leaves_other_references_alone_test() ->
+    State = replay([
+        {create_table, ~"users", [
+            #kura_column{name = id, type = id, primary_key = true},
+            #kura_column{name = code, type = string}
+        ]},
+        {create_table, ~"teams", [#kura_column{name = id, type = id, primary_key = true}]},
+        {create_table, ~"posts", [
+            #kura_column{name = user_code, type = string, references = {~"users", code}},
+            #kura_column{name = team_id, type = integer, references = {~"teams", id}}
+        ]},
+        {alter_table, ~"users", [{rename_column, id, user_id}]}
+    ]),
+    ?assertEqual({~"users", code}, (col(State, ~"posts", user_code))#kura_column.references),
+    ?assertEqual({~"teams", id}, (col(State, ~"posts", team_id))#kura_column.references).
+
+%%====================================================================
+%% A composite key is created as a table constraint
+%%====================================================================
+
+composite_desired() ->
+    #{
+        ~"t" => [
+            #kura_column{name = b, type = integer, primary_key = true},
+            #kura_column{name = a, type = integer, primary_key = true},
+            #kura_column{name = c, type = string}
+        ]
+    }.
+
+diff_creates_a_composite_key_as_a_table_constraint_test() ->
+    ?assertEqual(
+        {
+            [
+                {create_table, ~"t",
+                    [
+                        #kura_column{name = b, type = integer, nullable = false},
+                        #kura_column{name = a, type = integer, nullable = false},
+                        #kura_column{name = c, type = string}
+                    ],
+                    [{primary_key, [b, a]}]}
+            ],
+            [{drop_table, ~"t"}]
+        },
+        kura_schema_diff:diff(#{}, composite_desired())
+    ).
+
+diff_composite_key_round_trips_through_replay_test() ->
+    {Up, _Down} = kura_schema_diff:diff(#{}, composite_desired()),
+    ?assertEqual({[], []}, kura_schema_diff:diff(replay(Up), composite_desired())).
+
+diff_keeps_a_single_key_inline_test() ->
+    Cols = [#kura_column{name = id, type = id, primary_key = true}],
+    ?assertMatch(
+        {[{create_table, ~"t", Cols}], _}, kura_schema_diff:diff(#{}, #{~"t" => Cols})
+    ).
+
+diff_leaves_an_existing_nullable_composite_key_column_alone_test() ->
+    %% Postgres already holds every key column NOT NULL, and SQLite has no
+    %% ALTER COLUMN to tighten it, so a generated SET NOT NULL would be a
+    %% no-op on one and fail on the other.
+    State = replay([
+        {create_table, ~"t",
+            [#kura_column{name = a, type = integer}, #kura_column{name = b, type = integer}], [
+                {primary_key, [a, b]}
+            ]}
+    ]),
+    Desired = #{
+        ~"t" => [
+            #kura_column{name = a, type = integer, primary_key = true, nullable = false},
+            #kura_column{name = b, type = integer, primary_key = true}
+        ]
+    },
+    ?assertEqual({[], []}, kura_schema_diff:diff(State, Desired)).
+
+diff_refusal_survives_a_table_name_that_is_not_utf8_test() ->
+    Table = binary:copy(<<16#80>>, 70),
+    Db = #{Table => [#kura_column{name = id, type = id, primary_key = true}]},
+    ?assertError(
+        {kura_schema_diff, {primary_key_changed, Table, id, false, ~"_pkey"}},
+        kura_schema_diff:diff(Db, #{Table => [#kura_column{name = id, type = id}]})
+    ).
+
+format_error_primary_key_hint_pastes_as_erlang_test() ->
+    Msg = iolist_to_binary(
+        kura_schema_diff:format_error({primary_key_changed, ~"we\"ird\\x", id, false, ~"c\"k"})
+    ),
+    {match, Snippets} = re:run(
+        Msg, "\\{execute, ~\"(?:[^\"\\\\]|\\\\.)*\"\\}", [global, {capture, all, list}]
+    ),
+    ?assertEqual(
+        [
+            {execute, ~"ALTER TABLE \"we\"\"ird\\x\" DROP CONSTRAINT \"c\"\"k\""},
+            {execute, ~"ALTER TABLE \"we\"\"ird\\x\" ADD PRIMARY KEY (...)"}
+        ],
+        [eval_snippet(S) || [S] <- Snippets]
+    ).
+
+eval_snippet(Snippet) ->
+    {ok, Tokens, _} = erl_scan:string(Snippet ++ "."),
+    {ok, Exprs} = erl_parse:parse_exprs(Tokens),
+    {value, Value, _} = erl_eval:exprs(Exprs, erl_eval:new_bindings()),
+    Value.
+
+%%====================================================================
+%% The key comes from kura_schema:key/1, so key/0 wins over the flags
+%%====================================================================
+
+keyed_schema(Mod, Key, Fields) ->
+    meck:new(Mod, [non_strict]),
+    meck:expect(Mod, table, fun() -> ~"memberships" end),
+    meck:expect(Mod, fields, fun() -> Fields end),
+    meck:expect(Mod, key, fun() -> Key end),
+    Mod.
+
+membership_fields() ->
+    [
+        #kura_field{name = org_id, type = uuid, nullable = false},
+        #kura_field{name = user_id, type = uuid, nullable = false},
+        #kura_field{name = role, type = string}
+    ].
+
+membership_columns() ->
+    [
+        #kura_column{name = org_id, type = uuid, nullable = false},
+        #kura_column{name = user_id, type = uuid, nullable = false},
+        #kura_column{name = role, type = string}
+    ].
+
+desired_state_takes_a_composite_key_from_key_0_test() ->
+    Mod = keyed_schema(membership_k1, [org_id, user_id], membership_fields()),
+    try
+        Desired = kura_schema_diff:build_desired_state([Mod]),
+        {Up, Down} = kura_schema_diff:diff(#{}, Desired),
+        ?assertEqual(
+            [
+                {create_table, ~"memberships", membership_columns(), [
+                    {primary_key, [org_id, user_id]}
+                ]}
+            ],
+            Up
+        ),
+        ?assertEqual([{drop_table, ~"memberships"}], Down),
+        ?assertEqual({[], []}, kura_schema_diff:diff(replay(Up), Desired))
+    after
+        meck:unload(Mod)
+    end.
+
+desired_state_keeps_the_key_0_order_test() ->
+    Mod = keyed_schema(membership_k2, [user_id, org_id], membership_fields()),
+    try
+        {Up, _} = kura_schema_diff:diff(#{}, kura_schema_diff:build_desired_state([Mod])),
+        ?assertMatch([{create_table, _, _, [{primary_key, [user_id, org_id]}]}], Up)
+    after
+        meck:unload(Mod)
+    end.
+
+desired_state_key_0_wins_over_primary_key_flags_test() ->
+    Fields = [#kura_field{name = id, type = id, primary_key = true} | membership_fields()],
+    Mod = keyed_schema(membership_k3, [org_id, user_id], Fields),
+    try
+        Desired = kura_schema_diff:build_desired_state([Mod]),
+        Db = replay([
+            {create_table, ~"memberships",
+                [#kura_column{name = id, type = id} | membership_columns()], [
+                    {primary_key, [org_id, user_id]}
+                ]}
+        ]),
+        ?assertEqual({[], []}, kura_schema_diff:diff(Db, Desired))
+    after
+        meck:unload(Mod)
+    end.
+
+desired_state_takes_a_single_key_from_key_0_test() ->
+    Mod = keyed_schema(membership_k4, [id], [#kura_field{name = id, type = id}]),
+    try
+        {Up, _} = kura_schema_diff:diff(#{}, kura_schema_diff:build_desired_state([Mod])),
+        ?assertEqual(
+            [
+                {create_table, ~"memberships", [
+                    #kura_column{name = id, type = id, primary_key = true}
+                ]}
+            ],
+            Up
+        )
+    after
+        meck:unload(Mod)
+    end.
+
+desired_state_refuses_a_key_naming_no_field_test() ->
+    Mod = keyed_schema(membership_k5, [org_id, nope], membership_fields()),
+    try
+        ?assertError(
+            {kura_schema_diff, {key_unknown_field, membership_k5, nope}},
+            kura_schema_diff:build_desired_state([Mod])
+        ),
+        ?assertNotEqual(
+            nomatch,
+            string:find(
+                lists:flatten(
+                    kura_schema_diff:format_error({key_unknown_field, membership_k5, nope})
+                ),
+                "key/0 names 'nope'"
+            )
+        )
+    after
+        meck:unload(Mod)
+    end.
+
+diff_reference_cycle_names_only_tables_in_a_cycle_test() ->
+    Ref = fun(T) ->
+        #kura_column{
+            name = binary_to_atom(<<T/binary, "_id">>), type = integer, references = {T, id}
+        }
+    end,
+    Desired = #{
+        ~"a" => [Ref(~"b")],
+        ~"b" => [Ref(~"a")],
+        ~"m" => [Ref(~"a")],
+        ~"c" => [Ref(~"d")],
+        ~"d" => [Ref(~"c"), Ref(~"m")],
+        ~"n" => [Ref(~"n")]
+    },
+    ?assertError(
+        {kura_schema_diff, {reference_cycle, [~"a", ~"b", ~"c", ~"d"]}},
+        kura_schema_diff:diff(#{}, Desired)
+    ).
+
+diff_down_is_up_reversed_across_tables_and_columns_test() ->
+    Db = #{
+        ~"t1" => [#kura_column{name = x, type = integer}, #kura_column{name = y, type = integer}],
+        ~"t2" => [#kura_column{name = x, type = integer}]
+    },
+    Desired = #{
+        ~"t1" => [
+            #kura_column{name = x, type = bigint, default = 1},
+            #kura_column{name = y, type = bigint, default = 2},
+            #kura_column{name = z, type = string},
+            #kura_column{name = w, type = string}
+        ],
+        ~"t2" => [#kura_column{name = x, type = integer, default = 3}]
+    },
+    {_Up, Down} = kura_schema_diff:diff(Db, Desired),
+    ?assertEqual(
+        [
+            {execute, ~"ALTER TABLE \"t2\" ALTER COLUMN \"x\" DROP DEFAULT"},
+            {execute, ~"ALTER TABLE \"t1\" ALTER COLUMN \"y\" DROP DEFAULT"},
+            {execute, ~"ALTER TABLE \"t1\" ALTER COLUMN \"x\" DROP DEFAULT"},
+            {alter_table, ~"t1", [
+                {modify_column, y, integer},
+                {modify_column, x, integer},
+                {drop_column, z},
+                {drop_column, w}
+            ]}
+        ],
+        Down
+    ).
+
+replay_create_table_check_constraint_is_not_noted_test() ->
+    State = replay([
+        {create_table, ~"t", [#kura_column{name = b, type = integer}], [{check, ~"b > 0"}]}
+    ]),
+    ?assertEqual([], kura_schema_diff:unreplayed_executes(State)).
+
+desired_state_sees_a_key_0_redefined_in_the_same_vm_test() ->
+    Mod = keyed_schema(membership_k6, [org_id, user_id], membership_fields()),
+    try
+        First = kura_schema_diff:build_desired_state([Mod]),
+        ?assertEqual(#{~"memberships" => [org_id, user_id]}, maps:get(keys, First)),
+        meck:expect(Mod, key, fun() -> [user_id] end),
+        Second = kura_schema_diff:build_desired_state([Mod]),
+        ?assertEqual(#{~"memberships" => [user_id]}, maps:get(keys, Second))
+    after
+        meck:unload(Mod)
+    end.

@@ -7,7 +7,7 @@
 -define(DEPS, [{default, app_discovery}]).
 
 -doc false.
--spec init(rebar_state:t()) -> {ok, rebar_state:t()}.
+-spec init(term()) -> {ok, term()}.
 init(State) ->
     Provider = providers:create([
         {name, ?PROVIDER},
@@ -30,7 +30,7 @@ init(State) ->
     {ok, rebar_state:add_provider(State, Provider)}.
 
 -doc false.
--spec do(rebar_state:t()) -> {ok, rebar_state:t()} | {error, string()}.
+-spec do(term()) -> {ok, term()} | {error, string()}.
 do(State) ->
     App =
         case rebar_state:current_app(State) of

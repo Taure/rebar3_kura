@@ -22,8 +22,6 @@ dead) is opted out per-op through the migration's `safe/0` callback -
 the same list `kura_migrator` honours at apply time.
 """.
 
--behaviour(provider).
-
 -export([init/1, do/1, format_error/1]).
 
 -ifdef(TEST).

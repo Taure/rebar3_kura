@@ -190,15 +190,8 @@ composite_assoc_is_scoped_to_its_own_schema_test() ->
 
 invalid_on_delete_aborts_test() ->
     mock_parent(fk_p12),
-    mock_child(fk_c12, [
-        #kura_assoc{
-            name = user,
-            type = belongs_to,
-            schema = fk_p12,
-            foreign_key = user_id,
-            on_delete = cascde
-        }
-    ]),
+    Assoc = #kura_assoc{name = user, type = belongs_to, schema = fk_p12, foreign_key = user_id},
+    mock_child(fk_c12, [setelement(#kura_assoc.on_delete, Assoc, cascde)]),
     ?assertError(
         {kura_schema_diff, {invalid_on_delete, fk_c12, user, cascde}},
         kura_schema_diff:build_desired_state([fk_c12])
@@ -469,3 +462,20 @@ fk_on_update_refuses_test() ->
         {kura_schema_diff, {fk_on_update_not_owned, ~"posts", user_id, cascade}},
         kura_schema_diff:diff(Db, Desired)
     ).
+
+assoc_target_key_0_redefined_in_the_same_vm_is_seen_test() ->
+    mock_parent(fk_p_rekey),
+    meck:expect(fk_p_rekey, fields, fun() ->
+        [#kura_field{name = id, type = id}, #kura_field{name = uid, type = uuid}]
+    end),
+    meck:expect(fk_p_rekey, key, fun() -> [id] end),
+    mock_child(fk_c_rekey, [
+        #kura_assoc{name = user, type = belongs_to, schema = fk_p_rekey, foreign_key = user_id}
+    ]),
+    try
+        ?assertEqual({<<"users">>, id}, (fk_column(fk_c_rekey))#kura_column.references),
+        meck:expect(fk_p_rekey, key, fun() -> [uid] end),
+        ?assertEqual({<<"users">>, uid}, (fk_column(fk_c_rekey))#kura_column.references)
+    after
+        meck:unload([fk_p_rekey, fk_c_rekey])
+    end.
