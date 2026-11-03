@@ -236,6 +236,42 @@ assert_round_trip(Text) ->
         cleanup_mod(Mod)
     end.
 
+extension_hint_is_a_commented_first_op_test() ->
+    UpOps = [{create_table, ~"items", [#kura_column{name = e, type = {vector, 3}}]}],
+    DownOps = [{drop_table, ~"items"}],
+    Source = iolist_to_binary(
+        rebar3_kura_compile:render_migration("m_test_hint", UpOps, DownOps, [~"vector"])
+    ),
+    Extension = {execute, ~"CREATE EXTENSION IF NOT EXISTS vector"},
+    {ok, Mod} = compile_source("m_test_hint", Source),
+    try
+        ?assertEqual(UpOps, Mod:up()),
+        ?assertEqual(DownOps, Mod:down())
+    after
+        cleanup_mod(Mod)
+    end,
+    Uncommented = binary:replace(Source, ~"%% {execute,", ~"{execute,"),
+    {ok, Mod2} = compile_source("m_test_hint", Uncommented),
+    try
+        ?assertEqual([Extension | UpOps], Mod2:up())
+    after
+        cleanup_mod(Mod2)
+    end,
+    Plain = iolist_to_binary(
+        rebar3_kura_compile:render_migration("m_test_hint", UpOps, DownOps, [])
+    ),
+    ?assertEqual(nomatch, binary:match(Plain, ~"EXTENSION")).
+
+extension_hint_refuses_a_name_that_could_leave_the_comment_test_() ->
+    Ops = [{drop_table, ~"t"}],
+    [
+        ?_assertError(
+            {invalid_extension_name, Name},
+            rebar3_kura_compile:render_migration("m_test_bad_ext", Ops, Ops, [Name])
+        )
+     || Name <- [~"x\ny", ~"x\"", ~"Vector", ~"", ~"a b"]
+    ].
+
 generated_source_round_trips_index_options_test() ->
     UpOps = [
         {create_index, ~"m", [e], #{
@@ -260,11 +296,17 @@ generated_source_round_trips_index_options_test() ->
 
 compile_generated_migration(Desc, UpOps, DownOps) ->
     ModName = "m_test_" ++ Desc,
-    Source = rebar3_kura_compile:render_migration(ModName, UpOps, DownOps),
+    compile_source(ModName, rebar3_kura_compile:render_migration(ModName, UpOps, DownOps, [])).
+
+compile_source(ModName, Source) ->
     Dir = make_temp_dir(),
     File = filename:join(Dir, ModName ++ ".erl"),
     ok = file:write_file(File, Source),
-    case compile:file(File, [binary, return_errors, {i, code:lib_dir(kura, include)}]) of
+    case
+        compile:file(File, [
+            binary, return_errors, {i, filename:join(code:lib_dir(kura), "include")}
+        ])
+    of
         {ok, Mod, Bin} when is_atom(Mod), is_binary(Bin) ->
             {module, Mod} = code:load_binary(Mod, File, Bin),
             cleanup_dir(Dir),
@@ -329,7 +371,7 @@ formatting_ops() ->
 
 formatted_migration_passes_erlfmt_check_test() ->
     {Up, Down} = formatting_ops(),
-    Raw = iolist_to_binary(rebar3_kura_compile:render_migration("m_fmt", Up, Down)),
+    Raw = iolist_to_binary(rebar3_kura_compile:render_migration("m_fmt", Up, Down, [])),
     Formatted = rebar3_kura_compile:format_source(Raw, []),
     ?assertNotEqual(Raw, Formatted),
     Chars = binary_to_list(Formatted),
@@ -337,7 +379,7 @@ formatted_migration_passes_erlfmt_check_test() ->
 
 formatted_migration_keeps_its_operations_test() ->
     {Up, Down} = formatting_ops(),
-    Raw = rebar3_kura_compile:render_migration("m_fmt_ops", Up, Down),
+    Raw = rebar3_kura_compile:render_migration("m_fmt_ops", Up, Down, []),
     {ok, Mod} = compile_source("m_fmt_ops", rebar3_kura_compile:format_source(Raw, [])),
     try
         ?assertEqual(Up, Mod:up()),
@@ -348,14 +390,14 @@ formatted_migration_keeps_its_operations_test() ->
 
 formatting_honours_print_width_test() ->
     {Up, Down} = formatting_ops(),
-    Raw = rebar3_kura_compile:render_migration("m_fmt_width", Up, Down),
+    Raw = rebar3_kura_compile:render_migration("m_fmt_width", Up, Down, []),
     Wide = rebar3_kura_compile:format_source(Raw, [{print_width, 200}]),
     Lines = string:split(Wide, ~"\n", all),
     ?assert(lists:any(fun(L) -> byte_size(L) > 100 end, Lines)).
 
 formatting_keeps_non_ascii_names_test() ->
     Up = [{create_table, ~"caf\x{e9}", [#kura_column{name = id, type = id, primary_key = true}]}],
-    Raw = rebar3_kura_compile:render_migration("m_fmt_utf8", Up, [{drop_table, ~"caf\x{e9}"}]),
+    Raw = rebar3_kura_compile:render_migration("m_fmt_utf8", Up, [{drop_table, ~"caf\x{e9}"}], []),
     Formatted = rebar3_kura_compile:format_source(Raw, []),
     ?assertNotEqual(nomatch, binary:match(Formatted, ~"~\"caf\x{e9}\"")).
 
@@ -392,35 +434,20 @@ erlfmt_that_is_not_a_plugin_is_not_used_test() ->
 
 insert_pragma_is_honoured_test() ->
     {Up, Down} = formatting_ops(),
-    Raw = rebar3_kura_compile:render_migration("m_fmt_pragma", Up, Down),
+    Raw = rebar3_kura_compile:render_migration("m_fmt_pragma", Up, Down, []),
     Out = rebar3_kura_compile:format_source(Raw, [{pragma, insert}]),
     [FirstLine | _] = binary:split(Out, ~"\n"),
     ?assertNotEqual(nomatch, binary:match(FirstLine, ~"@format")).
 
 require_pragma_leaves_source_without_one_as_rendered_test() ->
     {Up, Down} = formatting_ops(),
-    Raw = iolist_to_binary(rebar3_kura_compile:render_migration("m_fmt_req", Up, Down)),
+    Raw = iolist_to_binary(rebar3_kura_compile:render_migration("m_fmt_req", Up, Down, [])),
     ?assertEqual(Raw, rebar3_kura_compile:format_source(Raw, [{pragma, require}])).
 
 no_erlfmt_writes_source_as_rendered_test() ->
     {Up, Down} = formatting_ops(),
-    Raw = iolist_to_binary(rebar3_kura_compile:render_migration("m_fmt_none", Up, Down)),
+    Raw = iolist_to_binary(rebar3_kura_compile:render_migration("m_fmt_none", Up, Down, [])),
     ?assertEqual(Raw, rebar3_kura_compile:format_source(Raw, none)).
-
-compile_source(ModName, Source) ->
-    Dir = make_temp_dir(),
-    File = filename:join(Dir, ModName ++ ".erl"),
-    ok = file:write_file(File, Source),
-    Include = filename:join(code:lib_dir(kura), "include"),
-    Result = compile:file(File, [binary, return_errors, {i, Include}]),
-    cleanup_dir(Dir),
-    case Result of
-        {ok, Mod, Bin} when is_atom(Mod), is_binary(Bin) ->
-            {module, Mod} = code:load_binary(Mod, File, Bin),
-            {ok, Mod};
-        {error, Errors, _} ->
-            {error, Errors}
-    end.
 
 report_embedded_warns_for_both_shapes_test() ->
     ok = rebar3_kura_compile:report_embedded([

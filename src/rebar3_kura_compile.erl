@@ -9,7 +9,7 @@
     compile_opts/1,
     compile_all/3,
     cleanup/1,
-    render_migration/3,
+    render_migration/4,
     report_unreplayed/1,
     report_embedded/1,
     erlfmt_opts/1,
@@ -119,7 +119,8 @@ process_app(AppInfo, FmtOpts) ->
                 rebar_api:info("kura: schemas up to date", []);
             {UpOps, DownOps} ->
                 filelib:ensure_dir(filename:join(MigDir, ".")),
-                generate_migration(MigDir, UpOps, DownOps, FmtOpts),
+                Extensions = kura_schema_diff:required_extensions(DbState, UpOps),
+                generate_migration(MigDir, UpOps, DownOps, Extensions, FmtOpts),
                 rebar_api:info("kura: migration generated", [])
         end
     catch
@@ -233,13 +234,13 @@ cleanup(Modules) ->
 %% Migration generation
 %%====================================================================
 
-generate_migration(MigDir, UpOps, DownOps, FmtOpts) ->
+generate_migration(MigDir, UpOps, DownOps, Extensions, FmtOpts) ->
     Timestamp = make_timestamp(MigDir),
     Desc = derive_description(UpOps),
     ModName = lists:flatten(io_lib:format("m~s_~s", [Timestamp, Desc])),
     FileName = filename:join(MigDir, ModName ++ ".erl"),
 
-    Content = format_source(render_migration(ModName, UpOps, DownOps), FmtOpts),
+    Content = format_source(render_migration(ModName, UpOps, DownOps, Extensions), FmtOpts),
     ok = file:write_file(FileName, Content),
     rebar_api:info("kura: generated ~s", [FileName]).
 
@@ -361,7 +362,7 @@ utf8_or(Chars, Fallback) ->
         _ -> Fallback
     end.
 
-render_migration(ModName, UpOps, DownOps) ->
+render_migration(ModName, UpOps, DownOps, Extensions) ->
     io_lib:format(
         "-module(~s).~n"
         "-moduledoc false.~n"
@@ -376,12 +377,41 @@ render_migration(ModName, UpOps, DownOps) ->
         "-spec down() -> [kura_migration:operation()].~n"
         "down() ->~n"
         "    ~s.~n",
-        [ModName, render_ops(UpOps), render_ops(DownOps)]
+        [ModName, render_up_ops(UpOps, Extensions), render_ops(DownOps)]
     ).
 
+render_up_ops(Ops, []) ->
+    render_ops(Ops);
+render_up_ops(Ops, Extensions) ->
+    [
+        "[\n"
+        "     %% On PostgreSQL these column types need an extension. Uncomment\n"
+        "     %% unless it is missing and this role cannot create it; where it\n"
+        "     %% exists this is a no-op for any role.\n",
+        [extension_hint(E) || E <- Extensions],
+        "     ",
+        op_list(Ops),
+        "]"
+    ].
+
+%% Written into a comment, where a newline would end it.
+extension_hint(Name) ->
+    case re:run(Name, ~"\\A[a-z_][a-z0-9_]*\\z", [{capture, none}]) of
+        match ->
+            [
+                "     %% {execute, ",
+                sigil(<<"CREATE EXTENSION IF NOT EXISTS ", Name/binary>>),
+                "},\n"
+            ];
+        nomatch ->
+            error({invalid_extension_name, Name})
+    end.
+
 render_ops(Ops) ->
-    Inner = lists:join(",\n     ", [render_op(Op) || Op <- Ops]),
-    io_lib:format("[~s]", [Inner]).
+    ["[", op_list(Ops), "]"].
+
+op_list(Ops) ->
+    lists:join(",\n     ", [render_op(Op) || Op <- Ops]).
 
 render_op({create_table, Table, Cols}) ->
     ColStrs = lists:join(",\n        ", [render_column(C) || C <- Cols]),

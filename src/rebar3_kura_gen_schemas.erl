@@ -189,9 +189,10 @@ column_row(#{
     udt_name := U,
     character_maximum_length := L,
     is_nullable := N,
-    column_default := D
+    column_default := D,
+    atttypmod := M
 }) ->
-    {T, C, U, L, N, D}.
+    {T, C, U, L, N, D, M}.
 
 constraint_row(#{
     table_name := T, column_name := C, constraint_type := Ct, foreign_table := F
