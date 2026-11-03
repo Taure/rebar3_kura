@@ -2816,3 +2816,220 @@ desired_state_sees_a_key_0_redefined_in_the_same_vm_test() ->
     after
         meck:unload(Mod)
     end.
+
+%%====================================================================
+%% Declared index names (Taure/kura#212)
+%%====================================================================
+
+vector_table() ->
+    [{create_table, ~"m", [#kura_column{name = e, type = string}]}].
+
+cos_opts() ->
+    #{using => hnsw, opclass => vector_cosine_ops, name => ~"m_e_cos"}.
+
+l2_opts() ->
+    #{using => hnsw, opclass => vector_l2_ops}.
+
+desired_indexes(State, Table, Indexes) ->
+    #{columns => cols(State), indexes => #{Table => Indexes}}.
+
+diff_creates_a_named_index_and_drops_it_by_name_on_down_test() ->
+    State = replay(vector_table()),
+    ?assertEqual(
+        {[{create_index, ~"m", [e], cos_opts()}], [{drop_index, ~"m_e_cos"}]},
+        kura_schema_diff:diff(State, desired_indexes(State, ~"m", [{[e], cos_opts()}]))
+    ).
+
+diff_creates_a_plain_named_index_as_a_5_tuple_test() ->
+    State = replay(vector_table()),
+    Desired = desired_indexes(State, ~"m", [
+        {[e], #{unique => true, where => ~"e IS NOT NULL", name => ~"m_e_key"}}
+    ]),
+    ?assertEqual(
+        {
+            [{create_index, ~"m_e_key", ~"m", [e], [unique, {where, ~"e IS NOT NULL"}]}],
+            [{drop_index, ~"m_e_key"}]
+        },
+        kura_schema_diff:diff(State, Desired)
+    ).
+
+diff_after_a_named_index_was_created_is_empty_test() ->
+    Named = [
+        {[e], cos_opts()},
+        {[e], #{unique => true, name => ~"m_e_key"}},
+        {[e], #{unique => false, name => ~"m_e_plain"}},
+        {[e], #{concurrently => true, name => ~"m_e_online"}}
+    ],
+    Base = replay(vector_table()),
+    {Up, Down} = kura_schema_diff:diff(Base, desired_indexes(Base, ~"m", Named)),
+    Created = replay(vector_table() ++ Up),
+    ?assertEqual({[], []}, kura_schema_diff:diff(Created, desired_indexes(Created, ~"m", Named))),
+    ?assertEqual([], maps:get(~"m", idxs(replay(vector_table() ++ Up ++ Down)))).
+
+diff_removing_the_named_of_two_indexes_on_a_column_drops_the_named_test() ->
+    State = replay(
+        vector_table() ++
+            [
+                {create_index, ~"m", [e], cos_opts()},
+                {create_index, ~"m", [e], l2_opts()}
+            ]
+    ),
+    ?assertEqual(
+        {[{drop_index, ~"m_e_cos"}], [{create_index, ~"m", [e], cos_opts()}]},
+        kura_schema_diff:diff(State, desired_indexes(State, ~"m", [{[e], l2_opts()}]))
+    ).
+
+diff_removing_the_named_of_two_alike_indexes_drops_the_named_test() ->
+    State = replay(
+        vector_table() ++
+            [
+                {create_index, ~"m", [e], #{}},
+                {create_index, ~"m", [e], #{name => ~"m_e_other"}}
+            ]
+    ),
+    ?assertEqual(
+        {[{drop_index, ~"m_e_other"}], [{create_index, ~"m_e_other", ~"m", [e], []}]},
+        kura_schema_diff:diff(State, desired_indexes(State, ~"m", [{[e], #{}}]))
+    ),
+    ?assertEqual(
+        {[{drop_index, ~"m_e_index"}], [{create_index, ~"m", [e], #{}}]},
+        kura_schema_diff:diff(
+            State, desired_indexes(State, ~"m", [{[e], #{name => ~"m_e_other"}}])
+        )
+    ).
+
+diff_unnamed_index_does_not_take_a_declared_names_index_test() ->
+    State = replay(
+        vector_table() ++
+            [
+                {create_index, ~"m", [e], #{name => ~"m_e_one"}},
+                {create_index, ~"m", [e], #{name => ~"m_e_two"}}
+            ]
+    ),
+    Both = desired_indexes(State, ~"m", [{[e], #{}}, {[e], #{name => ~"m_e_one"}}]),
+    ?assertEqual({[], []}, kura_schema_diff:diff(State, Both)),
+    One = desired_indexes(State, ~"m", [{[e], #{name => ~"m_e_one"}}]),
+    ?assertMatch({[{drop_index, ~"m_e_two"}], _}, kura_schema_diff:diff(State, One)).
+
+replay_drop_index_removes_only_the_named_index_test() ->
+    Created =
+        vector_table() ++
+            [
+                {create_index, ~"m", [e], cos_opts()},
+                {create_index, ~"m", [e], l2_opts()}
+            ],
+    ?assertEqual(
+        [{[e], l2_opts()}],
+        maps:get(~"m", idxs(replay(Created ++ [{drop_index, ~"m_e_cos"}])))
+    ),
+    ?assertEqual(
+        [{[e], cos_opts()}],
+        maps:get(~"m", idxs(replay(Created ++ [{drop_index, ~"m_e_index"}])))
+    ).
+
+diff_renamed_index_is_a_drop_and_a_create_test() ->
+    State = replay(vector_table() ++ [{create_index, ~"m", [e], cos_opts()}]),
+    Renamed = (cos_opts())#{name => ~"m_e_cosine"},
+    ?assertEqual(
+        {
+            [{drop_index, ~"m_e_cos"}, {create_index, ~"m", [e], Renamed}],
+            [{drop_index, ~"m_e_cosine"}, {create_index, ~"m", [e], cos_opts()}]
+        },
+        sorted_index_ops(
+            kura_schema_diff:diff(State, desired_indexes(State, ~"m", [{[e], Renamed}]))
+        )
+    ).
+
+diff_naming_a_generated_index_renames_it_test() ->
+    State = replay(vector_table() ++ [{create_index, ~"m", [e], #{}}]),
+    ?assertEqual(
+        {
+            [{drop_index, ~"m_e_index"}, {create_index, ~"m_e_by", ~"m", [e], []}],
+            [{drop_index, ~"m_e_by"}, {create_index, ~"m", [e], #{}}]
+        },
+        sorted_index_ops(
+            kura_schema_diff:diff(
+                State, desired_indexes(State, ~"m", [{[e], #{name => ~"m_e_by"}}])
+            )
+        )
+    ).
+
+diff_options_only_change_is_a_drop_and_a_create_test_() ->
+    Old = cos_opts(),
+    Changes = [
+        {"using", Old#{using => ivfflat}},
+        {"opclass", Old#{opclass => vector_ip_ops}},
+        {"with", Old#{with => #{m => 32}}},
+        {"with value", Old#{with => #{m => 16}}}
+    ],
+    Base = vector_table() ++ [{create_index, ~"m", [e], Old#{with => #{m => 8}}}],
+    [
+        {Label,
+            ?_assertEqual(
+                {
+                    [{drop_index, ~"m_e_cos"}, {create_index, ~"m", [e], New}],
+                    [
+                        {drop_index, ~"m_e_cos"},
+                        {create_index, ~"m", [e], Old#{with => #{m => 8}}}
+                    ]
+                },
+                begin
+                    State = replay(Base),
+                    sorted_index_ops(
+                        kura_schema_diff:diff(State, desired_indexes(State, ~"m", [{[e], New}]))
+                    )
+                end
+            )}
+     || {Label, New} <- Changes
+    ].
+
+diff_unnamed_options_change_keeps_the_generated_name_test() ->
+    State = replay(vector_table() ++ [{create_index, ~"m", [e], #{using => hnsw}}]),
+    ?assertEqual(
+        {
+            [{drop_index, ~"m_e_index"}, {create_index, ~"m", [e], #{using => gin}}],
+            [{drop_index, ~"m_e_index"}, {create_index, ~"m", [e], #{using => hnsw}}]
+        },
+        sorted_index_ops(
+            kura_schema_diff:diff(State, desired_indexes(State, ~"m", [{[e], #{using => gin}}]))
+        )
+    ).
+
+diff_without_a_name_keeps_the_generated_name_test() ->
+    State = replay(vector_table()),
+    ?assertEqual(
+        {[{create_index, ~"m", [e], #{unique => true}}], [{drop_index, ~"m_e_index"}]},
+        kura_schema_diff:diff(State, desired_indexes(State, ~"m", [{[e], #{unique => true}}]))
+    ).
+
+diff_name_that_is_not_a_nonempty_binary_takes_the_generated_name_test_() ->
+    [
+        ?_assertEqual(
+            {[{create_index, ~"m", [e], #{}}], [{drop_index, ~"m_e_index"}]},
+            begin
+                State = replay(vector_table()),
+                kura_schema_diff:diff(State, desired_indexes(State, ~"m", [{[e], #{name => Name}}]))
+            end
+        )
+     || Name <- [~"", m_e_atom, "m_e_list"]
+    ].
+
+diff_dropping_a_declared_name_keeps_the_index_test() ->
+    State = replay(vector_table() ++ [{create_index, ~"m", [e], cos_opts()}]),
+    Unnamed = maps:without([name], cos_opts()),
+    ?assertEqual(
+        {[], []}, kura_schema_diff:diff(State, desired_indexes(State, ~"m", [{[e], Unnamed}]))
+    ).
+
+replay_5_tuple_concurrently_is_kept_test() ->
+    State = replay(vector_table() ++ [{create_index, ~"m_e_on", ~"m", [e], [concurrently]}]),
+    ?assertEqual(
+        [{[e], #{concurrently => true, name => ~"m_e_on"}}], maps:get(~"m", idxs(State))
+    ).
+
+sorted_index_ops({Up, Down}) ->
+    {lists:sort(fun index_op_order/2, Up), lists:sort(fun index_op_order/2, Down)}.
+
+index_op_order({drop_index, _}, _) -> true;
+index_op_order(_, {drop_index, _}) -> false;
+index_op_order(_, _) -> true.

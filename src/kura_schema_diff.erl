@@ -707,16 +707,21 @@ index_name(Table, Cols) ->
     ColsBin = lists:join(~"_", [atom_to_binary(C, utf8) || C <- Cols]),
     iolist_to_binary([Table, ~"_", ColsBin, ~"_index"]).
 
+-spec index_name(binary(), [atom()], map()) -> binary().
+index_name(Table, Cols, Opts) ->
+    case is_named(Opts) of
+        true -> maps:get(name, Opts);
+        false -> index_name(Table, Cols)
+    end.
+
+is_named(#{name := Name}) when is_binary(Name), Name =/= ~"" -> true;
+is_named(_Opts) -> false.
+
 -spec proplist_to_map([atom() | {atom(), term()}]) -> map().
 proplist_to_map(Opts) ->
-    lists:foldl(
-        fun
-            (unique, Acc) -> Acc#{unique => true};
-            ({K, V}, Acc) -> Acc#{K => V};
-            (_, Acc) -> Acc
-        end,
-        #{},
-        Opts
+    maps:from_list(
+        [{Flag, true} || Flag <- Opts, Flag =:= unique orelse Flag =:= concurrently] ++
+            [{K, V} || {K, V} <- Opts]
     ).
 
 %% Postgres drops an index along with any column it covers or its WHERE
@@ -820,7 +825,7 @@ rename(Old, Old, New) -> New;
 rename(Col, _Old, _New) -> Col.
 
 entry_name(Table, {Cols, Opts}) ->
-    maps:get(name, Opts, index_name(Table, Cols)).
+    index_name(Table, Cols, Opts).
 
 apply_alter_ops([], Cols) ->
     Cols;
@@ -850,48 +855,52 @@ apply_alter_ops([_Other | Rest], Cols) ->
     apply_alter_ops(Rest, Cols).
 
 diff_indexes(Table, DbIndexes, DesiredIndexes) ->
-    %% Normalize to sets of {Columns, Opts} for comparison
-    DbSet = normalize_indexes(DbIndexes),
-    DesiredSet = normalize_indexes(DesiredIndexes),
-    %% New indexes: in desired but not in DB
-    NewIdx = DesiredSet -- DbSet,
-    CreateUp = [{create_index, Table, Cols, Opts} || {Cols, Opts} <- NewIdx],
-    CreateDown = [{drop_index, index_name(Table, Cols)} || {Cols, _} <- NewIdx],
-    %% Dropped indexes: in DB but not in desired
-    Dropped = dropped_entries(DbSet -- DesiredSet, DbIndexes),
+    Desired = lists:enumerate(normalize_indexes(DesiredIndexes)),
+    {Named, Unnamed} = lists:partition(fun({_, {_, Opts}}) -> is_named(Opts) end, Desired),
+    {New, Dropped} = match_indexes(Table, Named ++ Unnamed, normalize_indexes(DbIndexes), []),
+    Created = [E || {_, E} <- lists:sort(New)],
+    CreateUp = [create_index_op(Table, E) || E <- Created],
+    CreateDown = [{drop_index, entry_name(Table, E)} || E <- Created],
     DropUp = [{drop_index, entry_name(Table, E)} || E <- Dropped],
-    DropDown = [recreate_index(Table, E) || E <- Dropped],
+    DropDown = [create_index_op(Table, E) || E <- Dropped],
     {CreateUp ++ DropUp, CreateDown ++ DropDown}.
 
-%% Each normalised index dropped takes one DB entry: two indexes that
-%% normalise alike, one of which the schema still wants, lose only one.
-dropped_entries([], _DbIndexes) ->
-    [];
-dropped_entries([{Cols, Opts} | Rest], DbIndexes) ->
-    {Taken, Left} = take_entry(Cols, Opts, DbIndexes, []),
-    [Taken | dropped_entries(Rest, Left)].
+%% A declared name matches only the index of that name. Without one, the
+%% index under the generated name is taken first, then any alike: a column
+%% rename keeps the old name, and so does a migration that named it.
+%% Declared names are matched first, so an undeclared one cannot take the
+%% index a declared one names.
+match_indexes(_Table, [], Db, New) ->
+    {New, Db};
+match_indexes(Table, [{_, {Cols, Opts}} = Wanted | Rest], Db, New) ->
+    Shape = index_shape(Opts),
+    Alike = [E || {C, O} = E <- Db, C =:= Cols, index_shape(O) =:= Shape],
+    Name = index_name(Table, Cols, Opts),
+    Named = [E || E <- Alike, entry_name(Table, E) =:= Name],
+    case Named ++ [E || not is_named(Opts), E <- Alike] of
+        [E | _] -> match_indexes(Table, Rest, Db -- [E], New);
+        [] -> match_indexes(Table, Rest, Db, [Wanted | New])
+    end.
 
-take_entry(Cols, Opts, [{Cols, EntryOpts} = E | Rest], Seen) ->
-    case normalize_opts(EntryOpts) of
-        Opts -> {E, lists:reverse(Seen, Rest)};
-        _ -> take_entry(Cols, Opts, Rest, [E | Seen])
-    end;
-take_entry(Cols, Opts, [E | Rest], Seen) ->
-    take_entry(Cols, Opts, Rest, [E | Seen]).
+index_shape(Opts) ->
+    Unset = [Flag || Flag := false <- maps:with([unique, concurrently], Opts)],
+    maps:without([name | Unset], Opts).
 
-%% Rolling back recreates an index under the name it had, so a later drop
-%% by that name still finds it.
-recreate_index(Table, {Cols, #{name := Name} = Opts}) ->
-    case index_name(Table, Cols) of
-        Name -> {create_index, Table, Cols, normalize_opts(Opts)};
-        _ -> {create_index, Name, Table, Cols, opts_to_proplist(normalize_opts(Opts))}
-    end;
-recreate_index(Table, {Cols, Opts}) ->
-    {create_index, Table, Cols, normalize_opts(Opts)}.
+%% The 5-tuple carries a name to every kura release; only the map form
+%% takes using, opclass and with.
+create_index_op(Table, {Cols, Opts}) ->
+    Shape = index_shape(Opts),
+    Name = index_name(Table, Cols, Opts),
+    MapOnly = maps:without([unique, where, concurrently], Shape),
+    case {Name =:= index_name(Table, Cols), map_size(MapOnly)} of
+        {true, _} -> {create_index, Table, Cols, Shape};
+        {false, 0} -> {create_index, Name, Table, Cols, opts_to_proplist(Shape)};
+        {false, _} -> {create_index, Table, Cols, Shape#{name => Name}}
+    end.
 
 opts_to_proplist(Opts) ->
-    [unique || maps:get(unique, Opts, false) =:= true] ++
-        [{K, V} || K := V <- maps:without([unique], Opts)].
+    [Flag || Flag <- [unique, concurrently], maps:get(Flag, Opts, false) =:= true] ++
+        [{where, Where} || #{where := Where} <- [Opts]].
 
 is_drop_index({drop_index, _}) -> true;
 is_drop_index(_Op) -> false.
@@ -904,7 +913,7 @@ normalize_indexes(Indexes) ->
     [{Cols, normalize_opts(Opts)} || {Cols, Opts} <- Indexes].
 
 normalize_opts(Opts) when is_map(Opts) ->
-    maps:without([name], Opts);
+    Opts;
 normalize_opts(Opts) when is_list(Opts) ->
     proplist_to_map(Opts).
 
