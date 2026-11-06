@@ -2,6 +2,10 @@
 
 -export([init/1, do/1, format_error/1]).
 
+-ifdef(TEST).
+-export([deprecation_message/0]).
+-endif.
+
 -define(PROVIDER, gen_auth).
 -define(NAMESPACE, kura).
 -define(DEPS, [{default, app_discovery}]).
@@ -17,8 +21,11 @@ init(State) ->
         {deps, ?DEPS},
         {example, "rebar3 kura gen_auth"},
         {opts, []},
-        {short_desc, "Generate email/password authentication schemas"},
+        {short_desc, "Deprecated: use rebar3 nova gen_auth"},
         {desc,
+            "Deprecated: use `rebar3 nova gen_auth` from rebar3_nova, which\n"
+            "targets nova_auth 0.3. This command still works but will be\n"
+            "removed in a future release.\n\n"
             "Generates Kura schemas, migration, and accounts context module\n"
             "for email/password authentication.\n\n"
             "Generated files:\n"
@@ -32,6 +39,7 @@ init(State) ->
 -doc false.
 -spec do(term()) -> {ok, term()} | {error, string()}.
 do(State) ->
+    warn_deprecated(),
     App =
         case rebar_state:current_app(State) of
             undefined ->
@@ -50,6 +58,13 @@ do(State) ->
     generate_accounts(AppName, AppDir),
     print_instructions(AppName),
     {ok, State}.
+
+warn_deprecated() ->
+    rebar_api:warn(deprecation_message(), []).
+
+deprecation_message() ->
+    "kura: rebar3 kura gen_auth is deprecated and will be removed in a future "
+    "release. Use rebar3 nova gen_auth from rebar3_nova, which targets nova_auth 0.3".
 
 -doc false.
 -spec format_error(any()) -> iolist().

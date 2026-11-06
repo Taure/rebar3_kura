@@ -12,9 +12,12 @@ exiting non-zero if anything is missing.
 rebar3 kura check       # exit 1 with a drift report, or 0 if clean
 ```
 
-Use it as a CI step right after build. Anybody who edits a schema
-without regenerating a migration (or any tool that generates an
-incomplete diff) gets a red build instead of a silent landmine.
+Run it in CI before anything that compiles the project. The
+`{pre, [{compile, {kura, compile}}]}` hook writes the missing migration
+during `rebar3 compile` (and `eunit`, `ct`, `dialyzer`, ...), so a check
+that runs after a compile reports no drift. Anybody who edits a schema
+without committing the migration gets a red build instead of a silent
+landmine.
 """.
 
 -export([init/1, do/1, format_error/1]).
@@ -95,6 +98,7 @@ check_app(AppInfo) ->
         DbState = kura_schema_diff:build_db_state(MigMods),
         rebar3_kura_compile:report_unreplayed(kura_schema_diff:unreplayed_executes(DbState)),
         DesiredState = kura_schema_diff:build_desired_state(SchemaMods),
+        rebar3_kura_compile:report_embedded(kura_schema_diff:embedded_schemas(DesiredState)),
         report_unsupported(kura_schema_diff:unsupported_schemas(DesiredState)),
         case kura_schema_diff:diff(DbState, DesiredState) of
             {[], []} -> none;

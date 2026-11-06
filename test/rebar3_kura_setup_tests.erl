@@ -9,7 +9,8 @@ render_repo_test_() ->
         {"behaviour", ?_assert(string:find(Content, "-behaviour(kura_repo).") =/= nomatch)},
         {"otp_app exported", ?_assert(string:find(Content, "otp_app/0") =/= nomatch)},
         {"otp_app returns app", ?_assert(string:find(Content, "otp_app() -> my_app.") =/= nomatch)},
-        {"start exported", ?_assert(string:find(Content, "start/0") =/= nomatch)},
+        {"no start/0, kura starts the pool at boot",
+            ?_assertEqual(nomatch, string:find(Content, "start"))},
         {"all exported", ?_assert(string:find(Content, "all/1") =/= nomatch)},
         {"get exported", ?_assert(string:find(Content, "get/2") =/= nomatch)},
         {"insert/1 exported", ?_assert(string:find(Content, "insert/1") =/= nomatch)},
@@ -56,3 +57,12 @@ render_repo_custom_name_test() ->
     Content = lists:flatten(rebar3_kura_setup:render_repo("my_db", "my_app")),
     ?assert(string:find(Content, "-module(my_db).") =/= nomatch),
     ?assert(string:find(Content, "otp_app() -> my_app.") =/= nomatch).
+
+missing_dep_hint_names_current_kura_and_a_backend_test() ->
+    Hint = lists:flatten(io_lib:format(rebar3_kura_setup:missing_dep_hint(), [])),
+    ?assertNotEqual(nomatch, string:find(Hint, "{kura, \"~> 2.28\"}")),
+    ?assertNotEqual(nomatch, string:find(Hint, "{kura_postgres, \"~> 1.1\"}")).
+
+render_repo_is_erlfmt_clean_test() ->
+    Content = lists:flatten(rebar3_kura_setup:render_repo("my_app_repo", "my_app")),
+    ?assertEqual({ok, Content, []}, erlfmt:format_string(Content, [])).

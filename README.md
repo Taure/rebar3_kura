@@ -8,7 +8,7 @@ Add the plugin to your `rebar.config`:
 
 ```erlang
 {project_plugins, [
-    {rebar3_kura, "~> 0.14"}
+    {rebar3_kura, "~> 0.16"}
 ]}.
 
 {provider_hooks, [
@@ -26,6 +26,10 @@ Runs automatically as a pre-compile hook. Diffs your `kura_schema` modules again
 $ rebar3 compile
 ===> kura: generated src/migrations/m20260214120000_create_pets.erl
 ```
+
+When the project lists [erlfmt](https://github.com/WhatsApp/erlfmt) in `project_plugins` (or `plugins`), the generated migration is written through it, with the `print_width` and pragma setting (`require_pragma`, `insert_pragma`, `delete_pragma`) from the project's `{erlfmt, [...]}` config, so `rebar3 fmt --check` passes right after a migration is generated. The repo module `rebar3 kura setup` writes is formatted the same way. An erlfmt that is only a dependency is not the project's formatter and is not used. Without the plugin the file is written as rendered.
+
+The plugin depends on kura itself to read your schemas. Keep your project on a kura release the plugin's pin (`~> 2.28`) accepts: rebar3 loads only one copy of kura, and an older one can read schemas differently from the kura your app runs.
 
 ### `rebar3 kura setup`
 
@@ -49,6 +53,14 @@ CI gate. Fails the build if your `kura_schema` modules have drifted from the mig
 
 ```
 $ rebar3 kura check     # exit 1 with a drift report, or 0 if clean
+```
+
+Run it **before** anything that compiles the project. The pre-compile hook writes the missing migration during `rebar3 compile`, and so during `eunit`, `ct`, `dialyzer` and every other command that compiles first, so a `check` that runs after one of them always reports no drift. `check` compiles the schemas and migrations it reads on its own, so it works on a fresh checkout. To also catch a migration that a later step generates, fail the build when the working tree changed:
+
+```yaml
+- run: rebar3 kura check
+- run: rebar3 compile
+- run: test -z "$(git status --porcelain)"
 ```
 
 ### `rebar3 kura gen_schemas`
@@ -85,9 +97,9 @@ $ rebar3 kura lint_migrations --warn   # report only, always exit 0
 
 Honours each migration's optional `safe/0` callback as a per-operation opt-out.
 
-### `rebar3 kura gen_auth`
+### `rebar3 kura gen_auth` (deprecated)
 
-Generates authentication schema and migration scaffolding for a new project.
+Deprecated: gen_auth now belongs to [rebar3_nova](https://github.com/novaframework/rebar3_nova). Use `rebar3 nova gen_auth`, which targets [nova_auth](https://github.com/novaframework/nova_auth) 0.3. `rebar3 kura gen_auth` prints a deprecation warning and still generates the same authentication schema and migration scaffolding as before; it will be removed in a future release.
 
 ## Auto-migration
 
@@ -279,6 +291,15 @@ and `check` print one warning per table that has them, the same warning as an
 unreplayed `execute`: a schema declaring the same unique index sees drift
 that is not there. A `{check, Expr}` constraint is not modelled either, but
 nothing the diff compares depends on it, so it is not reported.
+
+### Embedded schemas
+
+An embed in a schema's `embeds/0` is stored in a `jsonb` column named after it, so `#kura_embed{name = metadata, ...}` generates `#kura_column{name = metadata, type = jsonb}`. A field of the same name in `fields/0` declares the column instead, with its own type and nullability. Its `column` is ignored, as kura ignores it when it reads and writes the embed: the column is always the embed's name.
+
+An embedded schema module needs only `fields/0` and should not declare `-behaviour(kura_schema)`, since the hook reads every module that does. A module that declares it anyway and is embedded by another schema in the same app is handled by its `table/0`:
+
+- no `table/0`, or the `~"_embedded"` placeholder older kura guides showed: no table is generated, and `compile` and `check` warn by name
+- any other table name: the module is also a table schema, so its table is still generated, with a warning that it is embedded too
 
 ### Enum handling
 

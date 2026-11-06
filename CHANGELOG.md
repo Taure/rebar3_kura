@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- A schema with an embed declared only in `embeds/0`, and no field of the same name in `fields/0`, now gets an `add_column ... jsonb` for that embed on the next compile. `rebar3 kura check` fails until that migration is committed, so run `rebar3 kura compile` once after upgrading and commit the migration it writes
+
+### Deprecated
+
+- `rebar3 kura gen_auth` prints a deprecation warning. gen_auth now belongs to rebar3_nova: use `rebar3 nova gen_auth`, which targets nova_auth 0.3. `rebar3 kura gen_auth` still generates the same files as before and will be removed in a future release
+
 ### Added
 
 - `gen_schemas` reads a pgvector column's dimension, so `vector(N)` becomes `{vector, N}` instead of a bare `vector`, and `vector(N)[]` becomes `{array, {vector, N}}`
@@ -9,6 +17,9 @@
 
 ### Changed
 
+- `rebar3 kura check` is documented to run before anything that compiles: the compile hook writes the missing migration first, so a check after `rebar3 compile`, `eunit` or `ct` always passes. If your CI runs `kura check` after a compiling step, move it before, or fail the build when the step left changes (`git diff --exit-code` and no untracked files under `src/migrations`)
+- `rebar3 kura setup` suggests `{kura, "~> 2.28"}` and `{kura_postgres, "~> 1.1"}`, and the generated repo module has no `start/0`: kura starts the pool from the `{repos, #{...}}` config at boot
+- Generated migrations, and the repo module `setup` writes, are written through erlfmt when the project lists it in `project_plugins` or `plugins`, with its `print_width` and pragma setting, so `rebar3 fmt --check` passes right after generation. An erlfmt that is only a dependency is not used
 - An index declared in `indexes/0` with a `name` is created, dropped and rolled back under that name, so a rollback no longer fails with "index does not exist" and removing one of two indexes on a column drops that one. A changed `name`, or a change to `using`, `opclass` or `with` alone, generates a drop and a create of the index. An undeclared name matches the index under the generated name first, then any alike index whose name no declaration claims, so a column rename or a migration-chosen name is not drift. Default naming is unchanged. Earlier versions created a named index under the generated name, so the first diff drops such an index and recreates it under its declared name
 - A `name` in `indexes/0` that is not a binary of 1 to 63 bytes aborts with `invalid_index_name`, as kura with Taure/kura#212 does, instead of being ignored. Two entries that resolve to the same index name, in any tables, abort with `duplicate_index_name`
 - A named index with only `unique`, `where` and `concurrently` is generated as the 5-tuple `create_index`, which kura honours before Taure/kura#212, though only from kura 2.25.0 for `concurrently`. A named index with `using`, `opclass` or `with` is generated in the map form, which needs the app on kura 2.27.0 or later: older kura ignores the `name` and those options there and builds a plain btree under the generated name
@@ -18,6 +29,9 @@
 
 ### Fixed
 
+- An embed declared only in `embeds/0` gets its `jsonb` column; it used to get none unless `fields/0` declared it too. A schema with such an embed gets an `add_column ... jsonb` migration on the next compile, and `rebar3 kura check` fails until that migration is committed. A field named like an embed keeps its type and nullability but not its `column`, matching what kura reads and writes
+- A schema module that another schema embeds gets no table when it has no `table/0` or the `table() -> ~"_embedded"` placeholder older kura guides showed, even when it declares `-behaviour(kura_schema)`; `compile` and `check` warn by name. An embedded module naming any other table keeps it, with a warning
+- `embeds/0` raising aborts with `embeds_failed`, naming the schema, as `associations/0` does
 - Generated `up/0` creates a new table after the new tables it references, and `down/0` undoes every step of `up/0` in exactly the reverse order, across tables and columns, so a rollback no longer drops a table a new column or foreign key still references (#41)
 - Replay reads `{create_table, Name, Columns, Constraints}`: the table was missing from the replayed state, so the next run generated a second `create_table` for it. A `primary_key` constraint marks its columns; a table's `unique` constraints are reported together, once, like an unreplayed `execute`, and `check` constraints, which no diff depends on, are not reported (#52)
 - `concurrently` is not compared, so turning it on or off no longer drops and rebuilds an index. A new index keeps it

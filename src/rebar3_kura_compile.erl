@@ -10,7 +10,10 @@
     compile_all/3,
     cleanup/1,
     render_migration/4,
-    report_unreplayed/1
+    report_unreplayed/1,
+    report_embedded/1,
+    erlfmt_opts/1,
+    format_source/2
 ]).
 
 -ifdef(TEST).
@@ -18,6 +21,8 @@
 -endif.
 
 -include_lib("kura/include/kura.hrl").
+
+-type fmt_opt() :: {print_width, pos_integer()} | {pragma, require | insert | delete}.
 
 -define(PROVIDER, compile).
 -define(NAMESPACE, kura).
@@ -44,8 +49,9 @@ do(State) ->
             undefined -> rebar_state:project_apps(State);
             AppInfo -> [AppInfo]
         end,
+    FmtOpts = erlfmt_opts(State),
     ensure_code_path(State),
-    lists:foreach(fun(AppInfo) -> process_app(AppInfo) end, Apps),
+    lists:foreach(fun(AppInfo) -> process_app(AppInfo, FmtOpts) end, Apps),
     {ok, State}.
 
 format_error(Reason) ->
@@ -90,7 +96,7 @@ ensure_kura_on_path(State) ->
             ok
     end.
 
-process_app(AppInfo) ->
+process_app(AppInfo, FmtOpts) ->
     AppDir = rebar_app_info:dir(AppInfo),
     SrcDir = filename:join(AppDir, "src"),
     MigDir = filename:join(SrcDir, "migrations"),
@@ -106,6 +112,7 @@ process_app(AppInfo) ->
         DbState = kura_schema_diff:build_db_state(MigMods),
         report_unreplayed(kura_schema_diff:unreplayed_executes(DbState)),
         DesiredState = kura_schema_diff:build_desired_state(SchemaMods),
+        report_embedded(kura_schema_diff:embedded_schemas(DesiredState)),
         report_unsupported(kura_schema_diff:unsupported_schemas(DesiredState)),
         case kura_schema_diff:diff(DbState, DesiredState) of
             {[], []} ->
@@ -113,7 +120,7 @@ process_app(AppInfo) ->
             {UpOps, DownOps} ->
                 filelib:ensure_dir(filename:join(MigDir, ".")),
                 Extensions = kura_schema_diff:required_extensions(DbState, UpOps),
-                generate_migration(MigDir, UpOps, DownOps, Extensions),
+                generate_migration(MigDir, UpOps, DownOps, Extensions, FmtOpts),
                 rebar_api:info("kura: migration generated", [])
         end
     catch
@@ -146,6 +153,26 @@ report_unreplayed(Statements) ->
      || SQL <- Statements
     ],
     ok.
+
+%% kura's guides once told embedded schemas to declare the behaviour, and
+%% such a module is still found by find_schema_files/2.
+-spec report_embedded([kura_schema_diff:embedded()]) -> ok.
+report_embedded(Embedded) ->
+    _ = [report_embedded_one(E) || E <- Embedded],
+    ok.
+
+report_embedded_one({Mod, Parent, skipped}) ->
+    rebar_api:warn(
+        "kura: ~s is embedded by ~s, so no table is generated for it. "
+        "An embedded schema should not declare -behaviour(kura_schema)",
+        [Mod, Parent]
+    );
+report_embedded_one({Mod, Parent, {table, Table}}) ->
+    rebar_api:warn(
+        "kura: ~s is embedded by ~s and also declares table \"~ts\", which is "
+        "still generated. If it is only an embed, remove -behaviour(kura_schema)",
+        [Mod, Parent, Table]
+    ).
 
 find_schema_files(SrcDir, MigDir) ->
     AllErl = filelib:wildcard(filename:join([SrcDir, "**", "*.erl"])),
@@ -207,13 +234,13 @@ cleanup(Modules) ->
 %% Migration generation
 %%====================================================================
 
-generate_migration(MigDir, UpOps, DownOps, Extensions) ->
+generate_migration(MigDir, UpOps, DownOps, Extensions, FmtOpts) ->
     Timestamp = make_timestamp(MigDir),
     Desc = derive_description(UpOps),
     ModName = lists:flatten(io_lib:format("m~s_~s", [Timestamp, Desc])),
     FileName = filename:join(MigDir, ModName ++ ".erl"),
 
-    Content = render_migration(ModName, UpOps, DownOps, Extensions),
+    Content = format_source(render_migration(ModName, UpOps, DownOps, Extensions), FmtOpts),
     ok = file:write_file(FileName, Content),
     rebar_api:info("kura: generated ~s", [FileName]).
 
@@ -275,6 +302,65 @@ is_index_op(_) -> false.
 
 is_execute_op({execute, _}) -> true;
 is_execute_op(_) -> false.
+
+%% erlfmt is not a dependency of this plugin. A project that formats with it
+%% lists it in project_plugins (or plugins), and that copy, with the
+%% project's own print width and pragma setting, is the one
+%% `rebar3 fmt --check` holds generated files to. An erlfmt that is only a
+%% dependency is not the project's formatter and is not used, even though it
+%% is on the code path. rebar3 does not always load a plugin's modules up
+%% front, so being configured is the test, not being loaded. Without it the
+%% source is written as rendered.
+-spec erlfmt_opts(term()) -> none | [fmt_opt()].
+erlfmt_opts(State) ->
+    case erlfmt_plugin(State) andalso code:ensure_loaded(erlfmt) =:= {module, erlfmt} of
+        true -> erlfmt_config(rebar_state:get(State, erlfmt, []));
+        false -> none
+    end.
+
+erlfmt_plugin(State) ->
+    Plugins = rebar_state:get(State, project_plugins, []) ++ rebar_state:get(State, plugins, []),
+    lists:any(fun(P) -> plugin_name(P) =:= erlfmt end, Plugins).
+
+plugin_name(Name) when is_atom(Name) -> Name;
+plugin_name(Plugin) when is_tuple(Plugin), tuple_size(Plugin) >= 1 -> element(1, Plugin);
+plugin_name(_) -> undefined.
+
+-spec erlfmt_config(term()) -> [fmt_opt()].
+erlfmt_config(Config) when is_list(Config) ->
+    Width = [{print_width, W} || {print_width, W} <- Config, is_integer(W), W > 0],
+    Pragma = [{pragma, Mode} || P <- Config, Mode <- pragma(P)],
+    lists:sublist(Width, 1) ++ lists:sublist(Pragma, 1);
+erlfmt_config(_) ->
+    [].
+
+-spec pragma(term()) -> [require | insert | delete].
+pragma(require_pragma) -> [require];
+pragma(insert_pragma) -> [insert];
+pragma(delete_pragma) -> [delete];
+pragma(_) -> [].
+
+-spec format_source(iodata(), none | [fmt_opt()]) -> binary().
+format_source(Source, none) ->
+    iolist_to_binary(Source);
+format_source(Source, Opts) ->
+    Bin = iolist_to_binary(Source),
+    case unicode:characters_to_list(Bin) of
+        Chars when is_list(Chars) ->
+            case erlfmt:format_string(Chars, Opts) of
+                {ok, Formatted, _Warnings} -> utf8_or(Formatted, Bin);
+                _ -> Bin
+            end;
+        _ ->
+            Bin
+    end.
+
+-spec utf8_or(string(), binary()) -> binary().
+utf8_or(Chars, Fallback) ->
+    case unicode:characters_to_binary(Chars) of
+        Out when is_binary(Out) -> Out;
+        _ -> Fallback
+    end.
 
 render_migration(ModName, UpOps, DownOps, Extensions) ->
     io_lib:format(
