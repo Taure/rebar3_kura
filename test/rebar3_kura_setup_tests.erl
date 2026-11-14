@@ -42,7 +42,7 @@ render_repo_compiles_test() ->
     Result = compile:file(File, [
         binary,
         return_errors,
-        {i, code:lib_dir(kura, include)}
+        {i, filename:join(code:lib_dir(kura), "include")}
     ]),
     file:delete(File),
     file:del_dir(TmpDir),
