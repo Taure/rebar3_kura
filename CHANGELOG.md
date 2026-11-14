@@ -29,6 +29,7 @@
 
 ### Fixed
 
+- A field's `column` is no longer turned into an atom at generation time. `kura_schema_diff` carries it as the binary: `field_to_column/1`, the desired state and the operations name such a column `~"email_address"` where they named it `email_address`, and compare names by their text, so a history that names the column by the atom is not drift. The generated migration writes the name as a quoted atom, `name = 'email_address'`, and so compiles for any column text. `t:kura_schema_diff:name/0` is the type. Replay also reads a statement about a column, or a foreign key to one, that no atom names
 - An embed declared only in `embeds/0` gets its `jsonb` column; it used to get none unless `fields/0` declared it too. A schema with such an embed gets an `add_column ... jsonb` migration on the next compile, and `rebar3 kura check` fails until that migration is committed. A field named like an embed keeps its type and nullability but not its `column`, matching what kura reads and writes
 - A schema module that another schema embeds gets no table when it has no `table/0` or the `table() -> ~"_embedded"` placeholder older kura guides showed, even when it declares `-behaviour(kura_schema)`; `compile` and `check` warn by name. An embedded module naming any other table keeps it, with a warning
 - `embeds/0` raising aborts with `embeds_failed`, naming the schema, as `associations/0` does

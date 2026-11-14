@@ -312,7 +312,7 @@ unique_tables([{Name, Cols} | Rest], Acc) ->
         false -> unique_tables(Rest, Acc ++ [{Name, Cols}])
     end.
 
--spec extract_added_names([kura_schema_diff:operation()]) -> [atom()].
+-spec extract_added_names([kura_schema_diff:operation()]) -> [kura_schema_diff:name()].
 extract_added_names(Ops) ->
     lists:flatmap(
         fun
@@ -324,7 +324,7 @@ extract_added_names(Ops) ->
         Ops
     ).
 
--spec extract_dropped_names([kura_schema_diff:operation()]) -> [atom()].
+-spec extract_dropped_names([kura_schema_diff:operation()]) -> [kura_schema_diff:name()].
 extract_dropped_names(Ops) ->
     lists:flatmap(
         fun

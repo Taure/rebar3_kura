@@ -132,7 +132,12 @@ all their foreign keys inline, so they need a hand-written migration.
 A field with `column = ~"email_address"` generates a column of that name.
 `key/0`, `foreign_key` and a `ref`'s `fields` and `target_key` name fields,
 and the generated key and `REFERENCES` name their columns. `indexes/0` and
-`constraints/0` are DDL and name columns.
+`constraints/0` are DDL and name columns, by an atom or by the binary.
+
+The generator makes no atom of such a name: `kura_schema_diff` carries it as
+the binary, and two names are the same column when their text is. The
+migration writes it as a quoted atom (`name = 'email_address'`), which kura
+before 2.31 needs, so any text works, `~"user handle"` included.
 
 Giving an existing field a `column`, or changing it, generates an
 `add_column` and a `drop_column`: the schema does not say that the data

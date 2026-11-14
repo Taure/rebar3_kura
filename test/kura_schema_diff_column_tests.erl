@@ -31,7 +31,7 @@ renamed_field_creates_its_column() ->
         [
             {create_table, ~"users", [
                 #kura_column{name = id, type = id, primary_key = true},
-                #kura_column{name = email_address, type = string, nullable = false}
+                #kura_column{name = ~"email_address", type = string, nullable = false}
             ]}
         ],
         up([col_users])
@@ -45,7 +45,7 @@ renamed_key_field_is_the_key_column() ->
     ?assertMatch(
         [
             {create_table, ~"users", [
-                #kura_column{name = user_id, primary_key = true},
+                #kura_column{name = ~"user_id", primary_key = true},
                 #kura_column{name = name, primary_key = false}
             ]}
         ],
@@ -62,10 +62,10 @@ renamed_composite_key_names_its_columns() ->
         [
             {create_table, ~"members",
                 [
-                    #kura_column{name = team_id, primary_key = false, nullable = false},
-                    #kura_column{name = user_id, primary_key = false, nullable = false}
+                    #kura_column{name = ~"team_id", primary_key = false, nullable = false},
+                    #kura_column{name = ~"user_id", primary_key = false, nullable = false}
                 ],
-                [{primary_key, [team_id, user_id]}]}
+                [{primary_key, [~"team_id", ~"user_id"]}]}
         ],
         up([col_members])
     ).
@@ -89,7 +89,7 @@ renamed_foreign_key_field_carries_the_reference() ->
     end),
     ?assertMatch(
         #kura_column{references = {~"users", id}, on_delete = cascade},
-        column(col_posts, ~"posts", written_by)
+        column(col_posts, ~"posts", ~"written_by")
     ).
 
 reference_names_the_column_of_a_renamed_target_key() ->
@@ -104,7 +104,7 @@ reference_names_the_column_of_a_renamed_target_key() ->
         [#kura_assoc{name = author, type = belongs_to, schema = col_users, foreign_key = author_id}]
     end),
     ?assertMatch(
-        #kura_column{references = {~"users", user_id}}, column(col_posts, ~"posts", author_id)
+        #kura_column{references = {~"users", ~"user_id"}}, column(col_posts, ~"posts", author_id)
     ).
 
 reference_names_the_column_of_a_renamed_ref_target_key() ->
@@ -126,7 +126,8 @@ reference_names_the_column_of_a_renamed_ref_target_key() ->
         ]
     end),
     ?assertMatch(
-        #kura_column{references = {~"users", login}}, column(col_posts, ~"posts", author_login)
+        #kura_column{references = {~"users", ~"login"}},
+        column(col_posts, ~"posts", ~"author_login")
     ).
 
 foreign_key_naming_no_field_still_aborts() ->
@@ -154,7 +155,7 @@ index_names_the_column() ->
     ]),
     meck:expect(col_users, indexes, fun() -> [{[email_address], #{unique => true}}] end),
     ?assertMatch(
-        [{create_table, ~"users", _}, {create_index, ~"users", [email_address], _}],
+        [{create_table, ~"users", _}, {create_index, ~"users", [~"email_address"], _}],
         up([col_users])
     ).
 
@@ -203,14 +204,14 @@ renaming_a_column_is_an_add_and_a_drop() ->
         {
             [
                 {alter_table, ~"users", [
-                    {add_column, #kura_column{name = email_address, type = string}},
+                    {add_column, #kura_column{name = ~"email_address", type = string}},
                     {drop_column, email}
                 ]}
             ],
             [
                 {alter_table, ~"users", [
                     {add_column, #kura_column{name = email, type = string}},
-                    {drop_column, email_address}
+                    {drop_column, ~"email_address"}
                 ]}
             ]
         },
@@ -241,7 +242,7 @@ custom_timestamps_are_the_declared_fields() ->
     meck:expect(col_events, timestamps, fun() ->
         [{created_at, utc_datetime}, {modified_at, utc_datetime}]
     end),
-    ?assertEqual([id, created, modified_at], column_names(col_events, ~"events")).
+    ?assertEqual([id, ~"created", modified_at], column_names(col_events, ~"events")).
 
 no_timestamps_adds_no_column() ->
     schema(col_events, ~"events", [
