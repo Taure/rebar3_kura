@@ -1,0 +1,16 @@
+[linters.undefined_function]
+exclude = [
+    {type = "MFA", mfa = "providers:create/1"},
+    {type = "MFA", mfa = "rebar_api:abort/2"},
+    {type = "MFA", mfa = "rebar_api:info/2"},
+    {type = "MFA", mfa = "rebar_api:warn/2"},
+    {type = "MFA", mfa = "rebar_app_info:dir/1"},
+    {type = "MFA", mfa = "rebar_app_info:ebin_dir/1"},
+    {type = "MFA", mfa = "rebar_app_info:name/1"},
+    {type = "MFA", mfa = "rebar_state:add_provider/2"},
+    {type = "MFA", mfa = "rebar_state:all_deps/1"},
+    {type = "MFA", mfa = "rebar_state:current_app/1"},
+    {type = "MFA", mfa = "rebar_state:get/3"},
+    {type = "MFA", mfa = "rebar_state:command_parsed_args/1"},
+    {type = "MFA", mfa = "rebar_state:project_apps/1"}
+]
