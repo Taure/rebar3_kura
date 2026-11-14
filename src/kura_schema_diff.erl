@@ -933,7 +933,7 @@ find_column(Name, Cols) when is_atom(Name); is_binary(Name) ->
 find_column(_NotAName, _Cols) ->
     error.
 
--doc false.
+%% The form two names are compared in.
 -spec text(name()) -> binary().
 text(Name) when is_atom(Name) -> atom_to_binary(Name, utf8);
 text(Name) when is_binary(Name) -> Name.
