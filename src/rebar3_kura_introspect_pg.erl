@@ -91,7 +91,7 @@ build_table(Table, Cols, Pks, Fks) ->
     {Fields, Skipped} = build_fields(Table, Cols, TablePks),
     Assocs = [
         {belongs_to, singular(FkTable), FkTable, Column}
-     || {Column, FkTable} <- maps:to_list(TableFks),
+     || Column := FkTable <- TableFks,
         valid_ident(Column),
         valid_ident(FkTable)
     ],
