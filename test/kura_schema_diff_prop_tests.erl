@@ -120,13 +120,6 @@ db_state() ->
         maps:from_list(unique_tables(Tables))
     ).
 
-kura_field() ->
-    ?LET(
-        {Name, Type, Virtual},
-        {column_name(), kura_type(), boolean()},
-        field(Name, Type, Virtual)
-    ).
-
 %%====================================================================
 %% Properties
 %%====================================================================
