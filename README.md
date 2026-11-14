@@ -70,10 +70,10 @@ Bootstraps `kura_schema` modules from an existing PostgreSQL database (the `db p
 ```
 $ rebar3 kura gen_schemas
 $ rebar3 kura gen_schemas --force    # overwrite existing schema files
-$ rebar3 kura gen_schemas --strict   # abort on any unsupported column type
+$ rebar3 kura gen_schemas --strict   # abort on any skipped column or table
 ```
 
-Catalog identifiers are allowlist-validated before codegen; unsupported types are skipped with a warning (or abort under `--strict`). A pgvector `vector(N)` column is generated as `{vector, N}` (`{array, {vector, N}}` for `vector(N)[]`), and one without a dimension as `vector`.
+A table or column whose name is not a lowercase ASCII identifier (`[a-z_][a-z0-9_]*`, 63 bytes at most) is skipped with a warning, as is a column of an unsupported type (`--strict` aborts on either). A name that passes and is not a plain atom is written quoted, so a column called `end` or `_id` generates a module that compiles. A pgvector `vector(N)` column is generated as `{vector, N}` (`{array, {vector, N}}` for `vector(N)[]`), and one without a dimension as `vector`.
 
 **Baseline the existing schema.** After `gen_schemas`, a `rebar3 compile` generates `create_table` migrations for tables that already exist — applying them would fail. Baseline them once with `kura_migrator:fake(Repo)`, which records every pending migration as applied **without running its DDL**, then migrate for real from there:
 

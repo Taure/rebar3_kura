@@ -1,5 +1,6 @@
 -module(rebar3_kura_gen_schemas_tests).
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("kura/include/kura.hrl").
 
 -define(TMPDIR, "/tmp").
 
@@ -99,6 +100,202 @@ constraint_row_follows_select_order_test() ->
         {<<"posts">>, <<"author_id">>, <<"FOREIGN KEY">>, <<"users">>},
         rebar3_kura_gen_schemas:constraint_row(Row)
     ).
+
+%%----------------------------------------------------------------------
+%% Names that are not plain atoms
+%%----------------------------------------------------------------------
+
+reserved_words() ->
+    [
+        ~"after",
+        ~"and",
+        ~"andalso",
+        ~"band",
+        ~"begin",
+        ~"bnot",
+        ~"bor",
+        ~"bsl",
+        ~"bsr",
+        ~"bxor",
+        ~"case",
+        ~"catch",
+        ~"cond",
+        ~"div",
+        ~"else",
+        ~"end",
+        ~"fun",
+        ~"if",
+        ~"let",
+        ~"maybe",
+        ~"not",
+        ~"of",
+        ~"or",
+        ~"orelse",
+        ~"receive",
+        ~"rem",
+        ~"try",
+        ~"when",
+        ~"xor"
+    ].
+
+%% What a database may hold and the introspection refuses. The generator is
+%% given them here as if it had not.
+hostile_names() ->
+    [
+        ~"x'). evil() -> ok. %",
+        ~"x\">>. evil() -> ok. %",
+        ~"x}]. evil() -> ok. %",
+        ~"line\nbreak",
+        ~"back\\slash",
+        ~"Upper",
+        ~"Variable_like",
+        ~"with space",
+        ~"användare",
+        ~"用户",
+        ~"1digit",
+        ~"a.b",
+        ~"$dollar",
+        ~"'quoted'"
+    ].
+
+column(Name) ->
+    #{name => Name, type => text, primary_key => false, nullable => true}.
+
+reserved_words_as_columns_test() ->
+    Names = reserved_words() ++ [~"_", ~"_hidden", ~"__"],
+    Module = compiled("myapp", #{
+        table => ~"words", fields => [column(Name) || Name <- Names], assocs => []
+    }),
+    try
+        ?assertEqual(
+            [binary_to_atom(Name) || Name <- Names],
+            [Field#kura_field.name || Field <- Module:fields()]
+        )
+    after
+        unloaded(Module)
+    end.
+
+reserved_words_as_tables_and_associations_test_() ->
+    [
+        fun() ->
+            Plural = <<Word/binary, "s">>,
+            Module = compiled("myapp", #{
+                table => Word,
+                fields => [column(Word)],
+                assocs => [{belongs_to, Word, Plural, Word}]
+            }),
+            try
+                ?assertEqual(binary_to_atom(<<"myapp_", Word/binary>>), Module),
+                ?assertEqual(Word, Module:table()),
+                ?assertEqual(
+                    [
+                        #kura_assoc{
+                            name = binary_to_atom(Word),
+                            type = belongs_to,
+                            schema = binary_to_atom(<<"myapp_", Plural/binary>>),
+                            foreign_key = binary_to_atom(Word)
+                        }
+                    ],
+                    Module:associations()
+                )
+            after
+                unloaded(Module)
+            end
+        end
+     || Word <- reserved_words()
+    ].
+
+hostile_columns_stay_inside_their_term_test_() ->
+    [
+        fun() ->
+            Module = compiled("myapp", #{
+                table => ~"things",
+                fields => [column(Name)],
+                assocs => [{belongs_to, Name, ~"others", Name}]
+            }),
+            try
+                Atom = binary_to_atom(Name),
+                ?assertEqual(schema_exports(), lists:sort(Module:module_info(exports))),
+                ?assertMatch([#kura_field{name = Atom, type = text}], Module:fields()),
+                ?assertMatch(
+                    [#kura_assoc{name = Atom, schema = myapp_others, foreign_key = Atom}],
+                    Module:associations()
+                )
+            after
+                unloaded(Module)
+            end
+        end
+     || Name <- hostile_names()
+    ].
+
+hostile_tables_stay_inside_their_term_test_() ->
+    [
+        fun() ->
+            Module = compiled("myapp", #{
+                table => Name,
+                fields => [column(~"id")],
+                assocs => [{belongs_to, ~"other", Name, ~"id"}]
+            }),
+            try
+                ?assertEqual(binary_to_atom(<<"myapp_", Name/binary>>), Module),
+                ?assertEqual(schema_exports(), lists:sort(Module:module_info(exports))),
+                ?assertEqual(Name, Module:table()),
+                ?assertMatch([#kura_assoc{schema = Module}], Module:associations())
+            after
+                unloaded(Module)
+            end
+        end
+     || Name <- hostile_names(), not is_map_key(Name, uncompilable_tables())
+    ].
+
+%% The compiler takes no module of such a name, so the module such a table
+%% would name is never built.
+uncompilable_tables() ->
+    #{
+        ~"line\nbreak" => ctrl_chars_in_module_name,
+        ~"用户" => non_latin1_module_unsupported
+    }.
+
+an_uncompilable_table_name_is_refused_by_the_compiler_test_() ->
+    [
+        ?_assertMatch(
+            {error, [{_Path, [{_Location, erl_lint, Reason}]}], []},
+            compile_source("myapp", #{table => Name, fields => [column(~"id")], assocs => []})
+        )
+     || Name := Reason <- uncompilable_tables()
+    ].
+
+schema_exports() ->
+    [{associations, 0}, {fields, 0}, {module_info, 0}, {module_info, 1}, {table, 0}].
+
+compiled(App, TableInfo) ->
+    {ok, Module, Beam} = compile_source(App, TableInfo),
+    {module, Module} = code:load_binary(Module, "generated.erl", Beam),
+    Module.
+
+compile_source(App, TableInfo) ->
+    Source = utf8(rebar3_kura_gen_schemas:schema_source(App, TableInfo)),
+    Dir = filename:join(
+        ?TMPDIR,
+        "rebar3_kura_gen_schemas_" ++ os:getpid() ++ "_" ++
+            integer_to_list(erlang:unique_integer([positive]))
+    ),
+    Path = filename:join(Dir, "generated.erl"),
+    ok = filelib:ensure_dir(Path),
+    ok = file:write_file(Path, Source),
+    Compiled = compile:file(Path, [binary, return_errors, warnings_as_errors]),
+    _ = file:del_dir_r(Dir),
+    Compiled.
+
+utf8(Source) ->
+    case unicode:characters_to_binary(Source) of
+        Encoded when is_binary(Encoded) -> Encoded
+    end.
+
+unloaded(Module) ->
+    _ = code:purge(Module),
+    _ = code:delete(Module),
+    ok.
 
 split_dots(Tokens) ->
     split_dots(Tokens, [], []).

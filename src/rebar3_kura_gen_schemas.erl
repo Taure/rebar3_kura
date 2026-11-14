@@ -21,6 +21,40 @@ migrations from.
 -define(NAMESPACE, kura).
 -define(DEPS, [{default, install_deps}]).
 
+%% Written quoted even where the running OTP takes them bare: `maybe` and
+%% `else` are reserved by a feature, `cond` and `let` for the future.
+-define(RESERVED_WORDS, [
+    "after",
+    "and",
+    "andalso",
+    "band",
+    "begin",
+    "bnot",
+    "bor",
+    "bsl",
+    "bsr",
+    "bxor",
+    "case",
+    "catch",
+    "cond",
+    "div",
+    "else",
+    "end",
+    "fun",
+    "if",
+    "let",
+    "maybe",
+    "not",
+    "of",
+    "or",
+    "orelse",
+    "receive",
+    "rem",
+    "try",
+    "when",
+    "xor"
+]).
+
 -doc false.
 -spec init(term()) -> {ok, term()}.
 init(State) ->
@@ -34,15 +68,16 @@ init(State) ->
         {opts, [
             {repo, $r, "repo", string, "Repo name to read config for (default: the sole repo)"},
             {force, $f, "force", boolean, "Overwrite existing schema files"},
-            {strict, $s, "strict", boolean, "Abort on any column of an unsupported type"}
+            {strict, $s, "strict", boolean, "Abort on any skipped column or table"}
         ]},
         {short_desc, "Generate kura schemas from an existing PostgreSQL database"},
         {desc,
             "Introspects the public schema of a live PostgreSQL database and\n"
             "generates one kura_schema module per table under src/schemas/.\n\n"
             "Emits schema modules only, never migrations. Existing files are\n"
-            "skipped unless --force. Columns of a type kura does not model are\n"
-            "skipped with a warning (--strict aborts instead)."}
+            "skipped unless --force. A column of a type kura does not model, and\n"
+            "a table or column whose name is not a lowercase ASCII identifier,\n"
+            "is skipped with a warning (--strict aborts instead)."}
     ]),
     {ok, rebar_state:add_provider(State, Provider)}.
 
@@ -56,10 +91,10 @@ do(State) ->
     {Args, _} = rebar_state:command_parsed_args(State),
     Config = resolve_repo_config(State, Args),
     ensure_backend_on_path(State, Config),
-    Tables = introspect(Config),
+    {Tables, UnsafeTables} = introspect(Config),
     Strict = proplists:get_bool(strict, Args),
     Force = proplists:get_bool(force, Args),
-    ok = report_skipped(Tables, Strict),
+    ok = report_skipped(Tables, UnsafeTables, Strict),
     lists:foreach(
         fun(Table) -> generate_schema(AppName, AppDir, Table, Force) end,
         Tables
@@ -159,7 +194,10 @@ introspect(Config) ->
         rebar3_kura_introspect_pg:constraints_query(),
         fun constraint_row/1
     ),
-    rebar3_kura_introspect_pg:build_tables(ColRows, ConRows).
+    {
+        rebar3_kura_introspect_pg:build_tables(ColRows, ConRows),
+        rebar3_kura_introspect_pg:unsafe_tables(ColRows)
+    }.
 
 pgo_config(Config, Pool) ->
     #{
@@ -203,35 +241,54 @@ constraint_row(#{
 %% Codegen
 %%----------------------------------------------------------------------
 
-report_skipped(Tables, Strict) ->
-    Skipped = lists:flatten([maps:get(skipped, T, []) || T <- Tables]),
-    lists:foreach(
-        fun({Table, Column, TypeName}) ->
-            rebar_api:warn(
-                "Skipping ~s.~s: kura does not model PG type ~s", [Table, Column, TypeName]
-            )
-        end,
-        Skipped
-    ),
-    case Strict andalso Skipped =/= [] of
-        true -> rebar_api:abort("Aborting (--strict): ~p unsupported columns", [length(Skipped)]);
-        false -> ok
+%% A name or type the catalog holds is printed as a term, so one with a
+%% newline or a terminal escape in it cannot write lines of its own.
+report_skipped(Tables, UnsafeTables, Strict) ->
+    Skipped = lists:append([maps:get(skipped, T, []) || T <- Tables]),
+    _ = [
+        rebar_api:warn("Skipping table ~0tp: its name is not a safe identifier", [Table])
+     || Table <- UnsafeTables
+    ],
+    _ = [warn_skipped(Skip) || Skip <- Skipped],
+    case Strict andalso {Skipped, UnsafeTables} =/= {[], []} of
+        true ->
+            rebar_api:abort(
+                "Aborting (--strict): ~p skipped columns, ~p skipped tables",
+                [length(Skipped), length(UnsafeTables)]
+            );
+        false ->
+            ok
     end.
 
+warn_skipped({Table, Column, ~"unsafe identifier"}) ->
+    rebar_api:warn(
+        "Skipping ~s.~0tp: its name is not a safe identifier", [Table, Column]
+    );
+warn_skipped({Table, Column, TypeName}) ->
+    rebar_api:warn(
+        "Skipping ~s.~s: kura does not model PG type ~0tp", [Table, Column, TypeName]
+    ).
+
 generate_schema(App, AppDir, #{table := Table} = TableInfo, Force) ->
-    Mod = App ++ "_" ++ binary_to_list(Table),
+    Mod = module_name(App, Table),
     FileName = filename:join([AppDir, "src", "schemas", Mod ++ ".erl"]),
     Content = schema_source(App, TableInfo),
     write_file(FileName, Content, Force).
 
--doc "Render a kura_schema module source for a table description. Pure.".
--spec schema_source(string(), map()) -> iolist().
+-doc """
+Render a kura_schema module source for a table description. Pure.
+
+A name that is not a plain atom is written quoted, so a column called `end`
+or `_id` is the atom of that name, and no name can end the term it is in. No
+atom is made of a name to do it.
+""".
+-spec schema_source(string(), map()) -> unicode:chardata().
 schema_source(App, #{table := Table, fields := Fields} = TableInfo) ->
-    Mod = App ++ "_" ++ binary_to_list(Table),
+    Mod = module_name(App, Table),
     Assocs = maps:get(assocs, TableInfo, []),
     [
         "-module(",
-        Mod,
+        quoted_atom(Mod),
         ").\n",
         "-behaviour(kura_schema).\n",
         "-include_lib(\"kura/include/kura.hrl\").\n\n",
@@ -241,9 +298,9 @@ schema_source(App, #{table := Table, fields := Fields} = TableInfo) ->
             _ -> ", associations/0"
         end,
         "]).\n\n",
-        "table() -> <<\"",
-        Table,
-        "\">>.\n\n",
+        "table() -> ",
+        io_lib:format("~0tp", [Table]),
+        ".\n\n",
         "fields() ->\n    [\n",
         lists:join(",\n", [render_field(F) || F <- Fields]),
         "\n    ].\n",
@@ -253,7 +310,7 @@ schema_source(App, #{table := Table, fields := Fields} = TableInfo) ->
 render_field(#{name := Name, type := Type, primary_key := Pk, nullable := Nullable}) ->
     Parts =
         [
-            io_lib:format("name = ~s", [Name]),
+            io_lib:format("name = ~ts", [quoted_atom(Name)]),
             io_lib:format("type = ~w", [Type])
         ] ++
             [io_lib:format("primary_key = ~w", [Pk]) || Pk] ++
@@ -270,11 +327,42 @@ render_associations(App, Assocs) ->
     ].
 
 render_assoc(App, {belongs_to, Name, FkTable, Column}) ->
-    Schema = App ++ "_" ++ binary_to_list(FkTable),
+    Schema = module_name(App, FkTable),
     io_lib:format(
-        "        #kura_assoc{name = ~s, type = belongs_to, schema = ~s, foreign_key = ~s}",
-        [Name, Schema, Column]
+        "        #kura_assoc{name = ~ts, type = belongs_to, schema = ~ts, foreign_key = ~ts}",
+        [quoted_atom(Name), quoted_atom(Schema), quoted_atom(Column)]
     ).
+
+-spec module_name(string(), binary()) -> string().
+module_name(App, Table) ->
+    App ++ "_" ++ characters(Table).
+
+-spec characters(binary()) -> string().
+characters(Name) ->
+    case unicode:characters_to_list(Name) of
+        Characters when is_list(Characters) -> Characters;
+        _NotUtf8 -> binary_to_list(Name)
+    end.
+
+-spec quoted_atom(binary() | string()) -> string().
+quoted_atom(Name) when is_binary(Name) ->
+    quoted_atom(characters(Name));
+quoted_atom(Name) when is_list(Name) ->
+    case plain_atom(Name) of
+        true -> Name;
+        false -> lists:flatten(io_lib:write_string(Name, $'))
+    end.
+
+-spec plain_atom(string()) -> boolean().
+plain_atom([First | Rest] = Name) when First >= $a, First =< $z ->
+    [] =:= [C || C <- Rest, not plain_atom_character(C)] andalso
+        not lists:member(Name, ?RESERVED_WORDS);
+plain_atom(_Name) ->
+    false.
+
+-spec plain_atom_character(char()) -> boolean().
+plain_atom_character(C) ->
+    (C >= $a andalso C =< $z) orelse (C >= $0 andalso C =< $9) orelse C =:= $_.
 
 write_file(Path, Content, Force) ->
     case filelib:is_regular(Path) andalso not Force of
@@ -282,8 +370,14 @@ write_file(Path, Content, Force) ->
             rebar_api:info("File already exists, skipping (use --force): ~s", [Path]);
         false ->
             ok = filelib:ensure_dir(Path),
-            ok = file:write_file(Path, Content),
+            ok = file:write_file(Path, utf8(Content)),
             rebar_api:info("Created ~s", [Path])
+    end.
+
+-spec utf8(unicode:chardata()) -> binary().
+utf8(Content) ->
+    case unicode:characters_to_binary(Content) of
+        Source when is_binary(Source) -> Source
     end.
 
 print_next_steps() ->
