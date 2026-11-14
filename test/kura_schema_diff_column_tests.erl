@@ -260,8 +260,8 @@ default_timestamp_fields_are_ordinary_columns() ->
     ]),
     ?assertEqual([id, inserted_at, updated_at], column_names(col_events, ~"events")).
 
-%% kura refuses such a schema when it writes a row. The generator derives
-%% columns from fields/0 alone, so it has none to write for the entry.
+%% kura warns about such a schema, and raises on it from 3.0. The generator
+%% derives columns from fields/0 alone, so it has none to write for the entry.
 a_timestamp_that_is_not_a_field_adds_no_column() ->
     schema(col_events, ~"events", [#kura_field{name = id, type = id, primary_key = true}]),
     meck:expect(col_events, timestamps, fun() -> [{created_at, utc_datetime}] end),
