@@ -1373,7 +1373,7 @@ key_columns(Cols) ->
     [C#kura_column.name || C <- Cols, C#kura_column.primary_key].
 
 col_map(Cols) ->
-    maps:from_list([{C#kura_column.name, C} || C <- Cols]).
+    #{C#kura_column.name => C || C <- Cols}.
 
 replay_execute(SQL, State) ->
     Stmt = statement(SQL),

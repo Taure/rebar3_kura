@@ -270,8 +270,8 @@ op_count_matches_changes(Table, DbCols, DesiredCols) ->
     Added = length(DesNames -- DbNames),
     Dropped = length(DbNames -- DesNames),
     Common = DesNames -- (DesNames -- DbNames),
-    DbMap = maps:from_list([{C#kura_column.name, C#kura_column.type} || C <- DbCols]),
-    DesMap = maps:from_list([{C#kura_column.name, C#kura_column.type} || C <- DesiredCols]),
+    DbMap = #{C#kura_column.name => C#kura_column.type || C <- DbCols},
+    DesMap = #{C#kura_column.name => C#kura_column.type || C <- DesiredCols},
     Modified = length([N || N <- Common, maps:get(N, DbMap) =/= maps:get(N, DesMap)]),
     TotalChanges = Added + Dropped + Modified,
     case TotalChanges of
