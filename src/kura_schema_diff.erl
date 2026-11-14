@@ -539,9 +539,15 @@ enrich_column({Mod, Assoc}, Columns) ->
             error({kura_schema_diff, {assoc_key_undeclared, Mod, Name}});
         [FK] ->
             Target = resolve_target(Mod, Assoc),
-            Refs = {Target:table(), target_key(Mod, Name, Assoc, Target)},
+            TargetKey = target_key(Mod, Name, Assoc, Target),
+            Refs = {Target:table(), field_column(Target, TargetKey, TargetKey)},
             OnDelete = assoc_on_delete(Mod, Assoc),
-            enrich_fk_column(Mod, Assoc, FK, Refs, OnDelete, Columns);
+            case field_column(Mod, FK, undefined) of
+                undefined ->
+                    error({kura_schema_diff, {assoc_key_not_a_field, Mod, Name, FK}});
+                Column ->
+                    enrich_fk_column(Column, Refs, OnDelete, Columns)
+            end;
         _Composite ->
             %% A composite foreign key is a table-level constraint, which the
             %% generator does not emit yet. Say so rather than emit a partial
@@ -580,21 +586,29 @@ declared_key(Mod) ->
         error:{no_primary_key, Mod} -> []
     end.
 
-enrich_fk_column(Mod, Assoc, FK, Refs, OnDelete, Columns) ->
-    case lists:any(fun(C) -> C#kura_column.name =:= FK end, Columns) of
-        false ->
-            error({kura_schema_diff, {assoc_key_not_a_field, Mod, Assoc#kura_assoc.name, FK}});
-        true ->
-            [
-                case C#kura_column.name of
-                    FK when C#kura_column.references =:= undefined ->
-                        C#kura_column{references = Refs, on_delete = OnDelete};
-                    _ ->
-                        C
-                end
-             || C <- Columns
-            ]
+%% An association names fields, and the constraint is on the columns they are
+%% stored in. A target key that is no field of the target is left as it was
+%% written: it then names a column the schema does not declare.
+-spec field_column(module(), atom(), atom() | undefined) -> atom() | undefined.
+field_column(Mod, Name, Otherwise) ->
+    case [F || #kura_field{name = N, virtual = false} = F <- Mod:fields(), N =:= Name] of
+        [Field | _] -> (field_to_column(Field))#kura_column.name;
+        [] -> Otherwise
     end.
+
+-spec enrich_fk_column(
+    atom(), {binary(), atom()}, kura_schema:on_delete() | undefined, [#kura_column{}]
+) -> [#kura_column{}].
+enrich_fk_column(FK, Refs, OnDelete, Columns) ->
+    [
+        case C#kura_column.name of
+            FK when C#kura_column.references =:= undefined ->
+                C#kura_column{references = Refs, on_delete = OnDelete};
+            _ ->
+                C
+        end
+     || C <- Columns
+    ].
 
 %% An association whose target cannot be resolved used to be swallowed by a
 %% blanket catch, so the foreign key was silently dropped from the generated

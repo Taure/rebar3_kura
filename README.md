@@ -127,6 +127,21 @@ drops them in the reverse order. New tables that reference each other in a
 cycle abort with `reference_cycle`: no order of `CREATE TABLE` can declare
 all their foreign keys inline, so they need a hand-written migration.
 
+### Fields stored under another column name
+
+A field with `column = ~"email_address"` generates a column of that name.
+`key/0`, `foreign_key` and a `ref`'s `fields` and `target_key` name fields,
+and the generated key and `REFERENCES` name their columns. `indexes/0` and
+`constraints/0` are DDL and name columns.
+
+Giving an existing field a `column`, or changing it, generates an
+`add_column` and a `drop_column`: the schema does not say that the data
+moved, so write a `rename_column` by hand when it did.
+
+`timestamps/0`, `redact/0` and `tenant_scoped/0` change how kura treats
+fields at run time and generate nothing: a timestamp field is a column only
+because `fields/0` declares it.
+
 ### Index names and options
 
 `indexes/0` entries are matched to the migration history by columns and
@@ -184,7 +199,7 @@ up() ->
 ### Foreign keys from associations
 
 A `belongs_to` in `associations/0` generates the `REFERENCES` clause on the
-column it names. `on_delete` on the `#kura_assoc{}` is carried through, so a
+column of the field it names. `on_delete` on the `#kura_assoc{}` is carried through, so a
 cascade rule needs no hand-written migration:
 
 ```erlang
