@@ -270,29 +270,38 @@ make_timestamp(MigDir) ->
     end.
 
 derive_description(Ops) ->
-    case Ops of
-        [{create_table, Table, _} | Rest] ->
-            created(Table, Rest);
-        [{create_table, Table, _, _} | Rest] ->
-            created(Table, Rest);
-        [{alter_table, Table, _}] ->
-            "alter_" ++ binary_to_list(Table);
-        [{alter_table, Table, _} | Rest] when Rest =/= [] ->
-            case lists:all(fun(Op) -> is_index_op(Op) orelse is_execute_op(Op) end, Rest) of
-                true -> "alter_" ++ binary_to_list(Table);
+    case described(Ops) of
+        {Verb, Table} ->
+            case rebar3_kura_introspect_pg:valid_ident(Table) of
+                true -> Verb ++ binary_to_list(Table);
                 false -> "update_schema"
             end;
-        [{drop_table, Table}] ->
-            "drop_" ++ binary_to_list(Table);
-        _ ->
+        none ->
             "update_schema"
     end.
 
--spec created(binary(), [kura_schema_diff:operation()]) -> string().
+%% The description becomes part of the module name and the file name of the
+%% migration, so a table is only named in it when it is a plain identifier.
+-spec described([kura_schema_diff:operation()]) -> {string(), binary()} | none.
+described([{create_table, Table, _} | Rest]) ->
+    created(Table, Rest);
+described([{create_table, Table, _, _} | Rest]) ->
+    created(Table, Rest);
+described([{alter_table, Table, _} | Rest]) ->
+    case lists:all(fun(Op) -> is_index_op(Op) orelse is_execute_op(Op) end, Rest) of
+        true -> {"alter_", Table};
+        false -> none
+    end;
+described([{drop_table, Table}]) ->
+    {"drop_", Table};
+described(_Ops) ->
+    none.
+
+-spec created(binary(), [kura_schema_diff:operation()]) -> {string(), binary()} | none.
 created(Table, Rest) ->
     case lists:all(fun is_index_op/1, Rest) of
-        true -> "create_" ++ binary_to_list(Table);
-        false -> "update_schema"
+        true -> {"create_", Table};
+        false -> none
     end.
 
 is_index_op({create_index, _, _, _}) -> true;
@@ -428,9 +437,11 @@ render_op({alter_table, Table, AlterOps}) ->
     OpStrs = lists:join(",\n        ", [render_alter_op(Op) || Op <- AlterOps]),
     io_lib:format("{alter_table, ~s, [~n        ~s~n    ]}", [sigil(Table), OpStrs]);
 render_op({create_index, Table, Columns, Opts}) ->
-    io_lib:format("{create_index, ~s, ~w, ~w}", [sigil(Table), Columns, Opts]);
+    io_lib:format("{create_index, ~s, ~s, ~w}", [sigil(Table), names(Columns), Opts]);
 render_op({create_index, Name, Table, Columns, Opts}) ->
-    io_lib:format("{create_index, ~s, ~s, ~w, ~w}", [sigil(Name), sigil(Table), Columns, Opts]);
+    io_lib:format(
+        "{create_index, ~s, ~s, ~s, ~w}", [sigil(Name), sigil(Table), names(Columns), Opts]
+    );
 render_op({drop_index, Name}) ->
     io_lib:format("{drop_index, ~s}", [sigil(Name)]);
 render_op({execute, SQL}) ->
@@ -443,24 +454,52 @@ sigil(Bin) ->
     Escaped = binary:replace(Bin, [<<$\\>>, <<$">>], <<$\\>>, [global, {insert_replaced, 1}]),
     [$~, $", Escaped, $"].
 
--spec render_constraints([kura_migration:table_constraint()]) -> iolist().
+-spec render_constraints([kura_schema_diff:constraint()]) -> iolist().
 render_constraints(Constraints) ->
     ["[", lists:join(", ", [render_constraint(C) || C <- Constraints]), "]"].
 
--spec render_constraint(kura_migration:table_constraint()) -> iolist().
+-spec render_constraint(kura_schema_diff:constraint()) -> iolist().
 render_constraint({check, Expr}) ->
     ["{check, ", sigil(Expr), "}"];
 render_constraint({Kind, Cols}) ->
-    io_lib:format("{~p, ~p}", [Kind, Cols]).
+    io_lib:format("{~p, ~s}", [Kind, names(Cols)]).
 
 render_alter_op({add_column, Col}) ->
     io_lib:format("{add_column, ~s}", [render_column(Col)]);
 render_alter_op({drop_column, Name}) ->
-    io_lib:format("{drop_column, ~p}", [Name]);
+    io_lib:format("{drop_column, ~s}", [name(Name)]);
 render_alter_op({modify_column, Name, Type}) ->
-    io_lib:format("{modify_column, ~p, ~p}", [Name, Type]);
+    io_lib:format("{modify_column, ~s, ~p}", [name(Name), Type]);
 render_alter_op({rename_column, Old, New}) ->
-    io_lib:format("{rename_column, ~p, ~p}", [Old, New]).
+    io_lib:format("{rename_column, ~s, ~s}", [name(Old), name(New)]).
+
+%% A column named by a binary is written as the atom of that text, always
+%% quoted, so a migration reads the same whatever the name holds. The atom
+%% is made when the migration is loaded, not here.
+-spec name(term()) -> iodata().
+name(Name) when is_binary(Name) ->
+    case unicode:characters_to_list(Name) of
+        Chars when is_list(Chars) -> utf8(io_lib:write_string(Chars, $'));
+        _NotUtf8 -> utf8(io_lib:write_string(binary_to_list(Name), $'))
+    end;
+name(Name) when is_atom(Name) ->
+    utf8(io_lib:write_atom(Name));
+name(Name) ->
+    io_lib:format("~p", [Name]).
+
+%% The source is written as UTF-8, and a character list holds code points.
+-spec utf8(io_lib:chars()) -> binary().
+utf8(Chars) ->
+    case unicode:characters_to_binary(Chars) of
+        Written when is_binary(Written) -> Written;
+        _ -> error({kura, {unwritable_name, Chars}})
+    end.
+
+-spec names(term()) -> iodata().
+names(Names) when is_list(Names) ->
+    ["[", lists:join(",", [name(Name) || Name <- Names]), "]"];
+names(NotAList) ->
+    io_lib:format("~p", [NotAList]).
 
 render_column(#kura_column{
     name = N,
@@ -472,7 +511,7 @@ render_column(#kura_column{
     on_delete = OnDel,
     on_update = OnUpd
 }) ->
-    Parts = [io_lib:format("name = ~p", [N]), io_lib:format("type = ~p", [T])],
+    Parts = [io_lib:format("name = ~s", [name(N)]), io_lib:format("type = ~p", [T])],
     Parts2 =
         case PK of
             true -> Parts ++ ["primary_key = true"];
@@ -493,7 +532,7 @@ render_column(#kura_column{
             undefined ->
                 Parts4;
             {RefTable, RefCol} ->
-                Parts4 ++ [io_lib:format("references = {~s, ~p}", [sigil(RefTable), RefCol])];
+                Parts4 ++ [io_lib:format("references = {~s, ~s}", [sigil(RefTable), name(RefCol)])];
             _ ->
                 Parts4 ++ [io_lib:format("references = ~p", [Refs])]
         end,

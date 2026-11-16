@@ -120,13 +120,6 @@ db_state() ->
         maps:from_list(unique_tables(Tables))
     ).
 
-kura_field() ->
-    ?LET(
-        {Name, Type, Virtual},
-        {column_name(), kura_type(), boolean()},
-        field(Name, Type, Virtual)
-    ).
-
 %%====================================================================
 %% Properties
 %%====================================================================
@@ -270,8 +263,8 @@ op_count_matches_changes(Table, DbCols, DesiredCols) ->
     Added = length(DesNames -- DbNames),
     Dropped = length(DbNames -- DesNames),
     Common = DesNames -- (DesNames -- DbNames),
-    DbMap = maps:from_list([{C#kura_column.name, C#kura_column.type} || C <- DbCols]),
-    DesMap = maps:from_list([{C#kura_column.name, C#kura_column.type} || C <- DesiredCols]),
+    DbMap = #{C#kura_column.name => C#kura_column.type || C <- DbCols},
+    DesMap = #{C#kura_column.name => C#kura_column.type || C <- DesiredCols},
     Modified = length([N || N <- Common, maps:get(N, DbMap) =/= maps:get(N, DesMap)]),
     TotalChanges = Added + Dropped + Modified,
     case TotalChanges of
@@ -319,7 +312,7 @@ unique_tables([{Name, Cols} | Rest], Acc) ->
         false -> unique_tables(Rest, Acc ++ [{Name, Cols}])
     end.
 
--spec extract_added_names([kura_schema_diff:operation()]) -> [atom()].
+-spec extract_added_names([kura_schema_diff:operation()]) -> [kura_schema_diff:name()].
 extract_added_names(Ops) ->
     lists:flatmap(
         fun
@@ -331,7 +324,7 @@ extract_added_names(Ops) ->
         Ops
     ).
 
--spec extract_dropped_names([kura_schema_diff:operation()]) -> [atom()].
+-spec extract_dropped_names([kura_schema_diff:operation()]) -> [kura_schema_diff:name()].
 extract_dropped_names(Ops) ->
     lists:flatmap(
         fun

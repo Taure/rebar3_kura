@@ -8,13 +8,17 @@ field type via `kura_types:from_pg_type/2`. The provider owns the DB
 connection and feeds the rows in, so everything here is testable without
 a database.
 
-Table and column names that are not safe Erlang/kura identifiers
-(`^[a-z_][a-z0-9_]*$`) are refused: an unsafe table is dropped whole, an
-unsafe column lands in `skipped`. This keeps a crafted catalog identifier
-from ever reaching code or path generation.
+Table and column names that are not safe Erlang/kura identifiers (a lowercase
+ASCII letter or `_`, then lowercase ASCII letters, digits and `_`, 63 bytes at
+most) are refused: an unsafe table is left out whole and listed by
+`unsafe_tables/1`, an unsafe column lands in `skipped`. This keeps a crafted
+catalog identifier from ever reaching code or path generation. Both queries
+are constant: no identifier is ever written into SQL.
 """.
 
--export([columns_query/0, constraints_query/0, build_tables/2, valid_ident/1]).
+-export([
+    columns_query/0, constraints_query/0, build_tables/2, unsafe_tables/1, valid_ident/1
+]).
 
 -doc "SQL selecting one row per column across the public schema.".
 -spec columns_query() -> string().
@@ -49,7 +53,7 @@ constraints_query() ->
 -spec valid_ident(binary()) -> boolean().
 valid_ident(Name) when is_binary(Name) ->
     byte_size(Name) =< 63 andalso
-        re:run(Name, "^[a-z_][a-z0-9_]*$", [{capture, none}]) =:= match;
+        re:run(Name, ~"\\A[a-z_][a-z0-9_]*\\z", [{capture, none}]) =:= match;
 valid_ident(_) ->
     false.
 
@@ -73,13 +77,21 @@ build_tables(ColumnRows, ConstraintRows) ->
      || {Table, Cols} <- group_by_table(ColumnRows), valid_ident(Table)
     ].
 
+-doc """
+The tables of `ColumnRows` that `build_tables/2` leaves out because their name
+is not a safe identifier.
+""".
+-spec unsafe_tables([tuple()]) -> [term()].
+unsafe_tables(ColumnRows) ->
+    [Table || {Table, _Cols} <- group_by_table(ColumnRows), not valid_ident(Table)].
+
 build_table(Table, Cols, Pks, Fks) ->
     TablePks = maps:get(Table, Pks, []),
     TableFks = maps:get(Table, Fks, #{}),
     {Fields, Skipped} = build_fields(Table, Cols, TablePks),
     Assocs = [
         {belongs_to, singular(FkTable), FkTable, Column}
-     || {Column, FkTable} <- maps:to_list(TableFks),
+     || Column := FkTable <- TableFks,
         valid_ident(Column),
         valid_ident(FkTable)
     ],

@@ -29,7 +29,7 @@ $ rebar3 compile
 
 When the project lists [erlfmt](https://github.com/WhatsApp/erlfmt) in `project_plugins` (or `plugins`), the generated migration is written through it, with the `print_width` and pragma setting (`require_pragma`, `insert_pragma`, `delete_pragma`) from the project's `{erlfmt, [...]}` config, so `rebar3 fmt --check` passes right after a migration is generated. The repo module `rebar3 kura setup` writes is formatted the same way. An erlfmt that is only a dependency is not the project's formatter and is not used. Without the plugin the file is written as rendered.
 
-The plugin depends on kura itself to read your schemas. Keep your project on a kura release the plugin's pin (`~> 2.28`) accepts: rebar3 loads only one copy of kura, and an older one can read schemas differently from the kura your app runs.
+The plugin depends on kura itself to read your schemas. Keep your project on a kura release the plugin's pin (2.31.1 or a later 2.x) accepts: rebar3 loads only one copy of kura, and an older one can read schemas differently from the kura your app runs.
 
 ### `rebar3 kura setup`
 
@@ -70,10 +70,10 @@ Bootstraps `kura_schema` modules from an existing PostgreSQL database (the `db p
 ```
 $ rebar3 kura gen_schemas
 $ rebar3 kura gen_schemas --force    # overwrite existing schema files
-$ rebar3 kura gen_schemas --strict   # abort on any unsupported column type
+$ rebar3 kura gen_schemas --strict   # abort on any skipped column or table
 ```
 
-Catalog identifiers are allowlist-validated before codegen; unsupported types are skipped with a warning (or abort under `--strict`). A pgvector `vector(N)` column is generated as `{vector, N}` (`{array, {vector, N}}` for `vector(N)[]`), and one without a dimension as `vector`.
+A table or column whose name is not a lowercase ASCII identifier (`[a-z_][a-z0-9_]*`, 63 bytes at most) is skipped with a warning, as is a column of an unsupported type (`--strict` aborts on either). A name that passes and is not a plain atom is written quoted, so a column called `end` or `_id` generates a module that compiles. A pgvector `vector(N)` column is generated as `{vector, N}` (`{array, {vector, N}}` for `vector(N)[]`), and one without a dimension as `vector`.
 
 **Baseline the existing schema.** After `gen_schemas`, a `rebar3 compile` generates `create_table` migrations for tables that already exist — applying them would fail. Baseline them once with `kura_migrator:fake(Repo)`, which records every pending migration as applied **without running its DDL**, then migrate for real from there:
 
@@ -126,6 +126,27 @@ New tables are created after the new tables they reference, and `down/0`
 drops them in the reverse order. New tables that reference each other in a
 cycle abort with `reference_cycle`: no order of `CREATE TABLE` can declare
 all their foreign keys inline, so they need a hand-written migration.
+
+### Fields stored under another column name
+
+A field with `column = ~"email_address"` generates a column of that name.
+`key/0`, `foreign_key` and a `ref`'s `fields` and `target_key` name fields,
+and the generated key and `REFERENCES` name their columns. `indexes/0` is
+DDL and names columns, by an atom or by the binary. The generator does not
+read `constraints/0`.
+
+The generator makes no atom of such a name: `kura_schema_diff` carries it as
+the binary, and two names are the same column when their text is. The
+migration writes it as a quoted atom (`name = 'email_address'`), so any
+text works, `~"user handle"` included.
+
+Giving an existing field a `column`, or changing it, generates an
+`add_column` and a `drop_column`: the schema does not say that the data
+moved, so write a `rename_column` by hand when it did.
+
+`timestamps/0`, `redact/0` and `tenant_scoped/0` change how kura treats
+fields at run time and generate nothing: a timestamp field is a column only
+because `fields/0` declares it.
 
 ### Index names and options
 
@@ -184,7 +205,7 @@ up() ->
 ### Foreign keys from associations
 
 A `belongs_to` in `associations/0` generates the `REFERENCES` clause on the
-column it names. `on_delete` on the `#kura_assoc{}` is carried through, so a
+column of the field it names. `on_delete` on the `#kura_assoc{}` is carried through, so a
 cascade rule needs no hand-written migration:
 
 ```erlang

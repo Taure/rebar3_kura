@@ -49,10 +49,16 @@
     <<"(?is)^ALTER\\s+TABLE\\s+", ?IDENT, "\\s+DROP\\s+CONSTRAINT\\s+", ?IDENT, "$">>
 ).
 
+-doc """
+The name of a column. A field's own name is an atom; a field stored under
+another name (`column = ~"..."`) names its column by that binary, and no atom
+is made of it. Two names are the same column when their text is the same.
+""".
+-type name() :: atom() | binary().
 -type col_state() :: #{binary() => [#kura_column{}]}.
--type index_entry() :: {[atom()], map()}.
+-type index_entry() :: {[name()], map()}.
 -type index_state() :: #{binary() => [index_entry()]}.
--type fk_key() :: {binary(), atom()}.
+-type fk_key() :: {binary(), name()}.
 -type db_state() :: #{
     columns => col_state(),
     indexes => index_state(),
@@ -60,28 +66,29 @@
     fk_names => #{fk_key() => binary()},
     fk_unowned => #{fk_key() => true},
     pk_names => #{binary() => binary()},
-    keys => #{binary() => [atom()]},
+    keys => #{binary() => [name()]},
     embedded => [embedded()],
     unreplayed => [binary()],
     extensions => #{binary() => true}
 }.
 -type embedded() :: {module(), module(), skipped | {table, binary()}}.
+-type constraint() :: {primary_key, [name()]} | {unique, [name()]} | {check, binary()}.
 -type operation() ::
     {create_table, binary(), [#kura_column{}]}
-    | {create_table, binary(), [#kura_column{}], [kura_migration:table_constraint()]}
+    | {create_table, binary(), [#kura_column{}], [constraint()]}
     | {drop_table, binary()}
     | {alter_table, binary(), [alter_op()]}
-    | {create_index, binary(), [atom()], map()}
-    | {create_index, binary(), binary(), [atom()], [atom() | {atom(), term()}]}
+    | {create_index, binary(), [name()], map()}
+    | {create_index, binary(), binary(), [name()], [atom() | {atom(), term()}]}
     | {drop_index, binary()}
     | {execute, binary()}.
 -type alter_op() ::
     {add_column, #kura_column{}}
-    | {drop_column, atom()}
-    | {rename_column, atom(), atom()}
-    | {modify_column, atom(), kura_types:kura_type()}.
+    | {drop_column, name()}
+    | {rename_column, name(), name()}
+    | {modify_column, name(), kura_types:kura_type()}.
 
--export_type([db_state/0, operation/0, alter_op/0, embedded/0]).
+-export_type([db_state/0, operation/0, alter_op/0, embedded/0, name/0, constraint/0]).
 
 %% Replay migrations to build current DB state
 -spec build_db_state([module()]) -> db_state().
@@ -176,7 +183,7 @@ schema_embeds(Mod) ->
 %% kura_schema:column_map/1 reads and writes. A field of the same name
 %% declares that column with its own type and nullability, but kura ignores
 %% its `column`, so the generator does too.
--spec field_columns([#kura_field{}], [atom()], [#kura_embed{}]) -> [#kura_column{}].
+-spec field_columns([#kura_field{}], [name()], [#kura_embed{}]) -> [#kura_column{}].
 field_columns(Fields, Key, Embeds) ->
     EmbedNames = [E#kura_embed.name || E <- Embeds],
     FieldColumns = [
@@ -217,9 +224,14 @@ desired_state_for(
         Key = schema_key(Mod, Fields),
         Columns = field_columns(Fields, Key, schema_embeds(Mod)),
         Enriched = enrich_with_associations(Mod, Columns),
-        Indexes = extract_indexes(Mod),
-        ok = check_index_columns(Mod, Indexes, Enriched),
-        ok = check_index_names(Mod, Indexes),
+        Declared = extract_indexes(Mod),
+        ok = check_index_columns(Mod, Declared, Enriched),
+        ok = check_index_names(Mod, Declared),
+        %% indexes/0 may name by an atom a column its field names by a binary.
+        Indexes = [
+            {[column_name(Col, Enriched) || Col <- Cols], Opts}
+         || {Cols, Opts} <- Declared
+        ],
         Names = [index_name(Table, Cols, Opts) || {Cols, Opts} <- normalize_indexes(Indexes)],
         Acc#{
             columns => ColAcc#{Table => Enriched},
@@ -234,19 +246,19 @@ desired_state_for(
             Acc#{unsupported => Unsup ++ [{Mod, Reason}]}
     end.
 
--spec schema_key(module(), [#kura_field{}]) -> [atom()].
+-spec schema_key(module(), [#kura_field{}]) -> [name()].
 schema_key(Mod, Fields) ->
     Names = declared_key(Mod),
     [key_column(Mod, Name, Fields) || Name <- Names].
 
--spec key_column(module(), atom(), [#kura_field{}]) -> atom().
+-spec key_column(module(), atom(), [#kura_field{}]) -> name().
 key_column(Mod, Name, Fields) ->
     case [F || F <- Fields, F#kura_field.name =:= Name] of
         [Field | _] -> (field_to_column(Field))#kura_column.name;
         [] -> error({kura_schema_diff, {key_unknown_field, Mod, Name}})
     end.
 
--spec with_key(#kura_column{}, [atom()]) -> #kura_column{}.
+-spec with_key(#kura_column{}, [name()]) -> #kura_column{}.
 with_key(Col, Key) ->
     Col#kura_column{primary_key = lists:member(Col#kura_column.name, Key)}.
 
@@ -317,8 +329,7 @@ extension_for(_) -> none.
 %% Otherwise dropping a field emits drop_column and the index declared on it
 %% comes back as a create_index on a column that no longer exists.
 check_index_columns(Mod, Indexes, Columns) ->
-    Known = [C#kura_column.name || C <- Columns],
-    case [Col || {Cols, _} <- Indexes, Col <- Cols, not lists:member(Col, Known)] of
+    case [Col || {Cols, _} <- Indexes, Col <- Cols, find_column(Col, Columns) =:= error] of
         [] -> ok;
         [Col | _] -> error({kura_schema_diff, {index_unknown_column, Mod, Col}})
     end.
@@ -358,10 +369,11 @@ extract_indexes(Mod) ->
 
 %% Diff DB state against desired state, returning {UpOps, DownOps}
 -spec diff(db_state() | col_state(), db_state() | col_state()) -> {[operation()], [operation()]}.
-diff(DbState, DesiredState) ->
-    DbCols = maps:get(columns, ensure_structured(DbState), #{}),
+diff(Replayed, DesiredState) ->
     DesiredCols = maps:get(columns, ensure_structured(DesiredState), #{}),
-    DbIdx = maps:get(indexes, ensure_structured(DbState), #{}),
+    DbState = named_as(ensure_structured(Replayed), DesiredCols),
+    DbCols = maps:get(columns, DbState, #{}),
+    DbIdx = maps:get(indexes, DbState, #{}),
     DesiredIdx = maps:get(indexes, ensure_structured(DesiredState), #{}),
     FkMeta = {maps:get(fk_names, DbState, #{}), maps:get(fk_unowned, DbState, #{})},
     PkNames = maps:get(pk_names, DbState, #{}),
@@ -438,7 +450,7 @@ diff(DbState, DesiredState) ->
 %% order of the fields.
 %% Its columns are written NOT NULL: SQLite, unlike PostgreSQL, lets a
 %% composite key column hold NULL, and then (1, NULL) is not unique.
--spec create_table(binary(), [#kura_column{}], [atom()] | undefined) -> operation().
+-spec create_table(binary(), [#kura_column{}], [name()] | undefined) -> operation().
 create_table(Table, Cols, undefined) ->
     create_table(Table, Cols, key_columns(Cols));
 create_table(Table, Cols, Key) ->
@@ -501,7 +513,7 @@ field_to_column(#kura_field{
     ColName =
         case Col of
             undefined -> N;
-            _ when is_binary(Col) -> binary_to_atom(Col, utf8)
+            _ when is_binary(Col) -> Col
         end,
     #kura_column{name = ColName, type = T, nullable = Null, default = Def, primary_key = PK}.
 
@@ -539,9 +551,15 @@ enrich_column({Mod, Assoc}, Columns) ->
             error({kura_schema_diff, {assoc_key_undeclared, Mod, Name}});
         [FK] ->
             Target = resolve_target(Mod, Assoc),
-            Refs = {Target:table(), target_key(Mod, Name, Assoc, Target)},
+            TargetKey = target_key(Mod, Name, Assoc, Target),
+            Refs = {Target:table(), field_column(Target, TargetKey, TargetKey)},
             OnDelete = assoc_on_delete(Mod, Assoc),
-            enrich_fk_column(Mod, Assoc, FK, Refs, OnDelete, Columns);
+            case field_column(Mod, FK, undefined) of
+                undefined ->
+                    error({kura_schema_diff, {assoc_key_not_a_field, Mod, Name, FK}});
+                Column ->
+                    enrich_fk_column(Column, Refs, OnDelete, Columns)
+            end;
         _Composite ->
             %% A composite foreign key is a table-level constraint, which the
             %% generator does not emit yet. Say so rather than emit a partial
@@ -580,21 +598,29 @@ declared_key(Mod) ->
         error:{no_primary_key, Mod} -> []
     end.
 
-enrich_fk_column(Mod, Assoc, FK, Refs, OnDelete, Columns) ->
-    case lists:any(fun(C) -> C#kura_column.name =:= FK end, Columns) of
-        false ->
-            error({kura_schema_diff, {assoc_key_not_a_field, Mod, Assoc#kura_assoc.name, FK}});
-        true ->
-            [
-                case C#kura_column.name of
-                    FK when C#kura_column.references =:= undefined ->
-                        C#kura_column{references = Refs, on_delete = OnDelete};
-                    _ ->
-                        C
-                end
-             || C <- Columns
-            ]
+%% An association names fields, and the constraint is on the columns they are
+%% stored in. A target key that is no field of the target is left as it was
+%% written: it then names a column the schema does not declare.
+-spec field_column(module(), atom(), atom() | undefined) -> name() | undefined.
+field_column(Mod, Name, Otherwise) ->
+    case [F || #kura_field{name = N, virtual = false} = F <- Mod:fields(), N =:= Name] of
+        [Field | _] -> (field_to_column(Field))#kura_column.name;
+        [] -> Otherwise
     end.
+
+-spec enrich_fk_column(
+    name(), {binary(), name()}, kura_schema:on_delete() | undefined, [#kura_column{}]
+) -> [#kura_column{}].
+enrich_fk_column(FK, Refs, OnDelete, Columns) ->
+    [
+        case C#kura_column.name of
+            FK when C#kura_column.references =:= undefined ->
+                C#kura_column{references = Refs, on_delete = OnDelete};
+            _ ->
+                C
+        end
+     || C <- Columns
+    ].
 
 %% An association whose target cannot be resolved used to be swallowed by a
 %% blanket catch, so the foreign key was silently dropped from the generated
@@ -695,7 +721,7 @@ format_error({fk_not_owned, Table, Col}) ->
         [Table, Col]
     );
 format_error({primary_key_changed, Table, Col, Joins, Constraint}) when
-    is_binary(Table), is_atom(Col), is_boolean(Joins), is_binary(Constraint)
+    is_binary(Table), is_atom(Col) orelse is_binary(Col), is_boolean(Joins), is_binary(Constraint)
 ->
     AlterTable = <<"ALTER TABLE ", (quote(Table))/binary>>,
     io_lib:format(
@@ -781,9 +807,9 @@ format_error(Reason) ->
 sigil(Bin) ->
     [$~, $", binary:replace(Bin, [<<$\\>>, <<$">>], <<$\\>>, [global, {insert_replaced, 1}]), $"].
 
--spec key_change(boolean(), atom()) -> iolist().
-key_change(true, Col) -> io_lib:format("adds column '~s' to the primary key", [Col]);
-key_change(false, Col) -> io_lib:format("takes column '~s' out of the primary key", [Col]).
+-spec key_change(boolean(), name()) -> iolist().
+key_change(true, Col) -> io_lib:format("adds column '~ts' to the primary key", [Col]);
+key_change(false, Col) -> io_lib:format("takes column '~ts' out of the primary key", [Col]).
 
 format_atoms(Atoms) ->
     lists:join(", ", [atom_to_list(A) || A <- Atoms]).
@@ -793,7 +819,8 @@ format_atoms(Atoms) ->
 apply_ops([], State) ->
     State;
 apply_ops([{create_table, Name, Cols} | Rest], #{columns := ColState} = State) ->
-    apply_ops(Rest, State#{columns => ColState#{Name => Cols}});
+    Created = ColState#{Name => Cols},
+    apply_ops(Rest, State#{columns => Created#{Name => [referencing(C, Created) || C <- Cols]}});
 apply_ops([{create_table, Name, Cols, Constraints} | Rest], State) ->
     Keyed = with_primary_key(Cols, lists:append([Key || {primary_key, Key} <- Constraints])),
     State1 = apply_ops([{create_table, Name, Keyed}], State),
@@ -806,9 +833,10 @@ apply_ops([{drop_table, Name} | Rest], #{columns := ColState, indexes := IdxStat
     },
     apply_ops(Rest, forget_fk_meta(fun({T, _}) -> T =/= Name end, State1));
 apply_ops(
-    [{alter_table, Name, AlterOps} | Rest], #{columns := ColState, indexes := IdxState} = State
+    [{alter_table, Name, Written} | Rest], #{columns := ColState, indexes := IdxState} = State
 ) ->
     Cols = maps:get(Name, ColState, []),
+    AlterOps = as_replayed(Written, Name, ColState),
     NewCols = apply_alter_ops(AlterOps, Cols),
     NewIdxState =
         case IdxState of
@@ -820,12 +848,12 @@ apply_ops(
     apply_ops(Rest, State1#{columns => NewColState, indexes => NewIdxState});
 apply_ops([{create_index, Table, Columns, Opts} | Rest], #{indexes := IdxState} = State) ->
     TableIdx = maps:get(Table, IdxState, []),
-    Entry = {Columns, Opts},
+    Entry = {replayed_columns(Columns, Table, State), Opts},
     apply_ops(Rest, State#{indexes => IdxState#{Table => TableIdx ++ [Entry]}});
 apply_ops([{create_index, Name, Table, Columns, Opts} | Rest], #{indexes := IdxState} = State) ->
     TableIdx = maps:get(Table, IdxState, []),
     OptsMap = (proplist_to_map(Opts))#{name => built_index_name(Name)},
-    Entry = {Columns, OptsMap},
+    Entry = {replayed_columns(Columns, Table, State), OptsMap},
     apply_ops(Rest, State#{indexes => IdxState#{Table => TableIdx ++ [Entry]}});
 apply_ops([{drop_index, IdxName} | Rest], #{indexes := IdxState} = State) ->
     NewIdxState = maps:map(
@@ -844,21 +872,117 @@ apply_ops([_Other | Rest], State) ->
 built_index_name(Name) when is_atom(Name) -> atom_to_binary(Name);
 built_index_name(Name) -> Name.
 
--spec with_primary_key([#kura_column{}], [atom()]) -> [#kura_column{}].
+-spec with_primary_key([#kura_column{}], [name()]) -> [#kura_column{}].
 with_primary_key(Cols, Key) ->
+    Keyed = [text(Name) || Name <- Key],
     [
-        case lists:member(C#kura_column.name, Key) of
+        case lists:member(text(C#kura_column.name), Keyed) of
             true -> C#kura_column{primary_key = true};
             false -> C
         end
      || C <- Cols
     ].
 
+%% A migration may name a column by an atom in one operation and by a binary
+%% in another. Replay keeps the name the column was created under, and every
+%% later operation is read as naming it that way, so the state holds one
+%% name for one column.
+-spec as_replayed([alter_op()], binary(), col_state()) -> [alter_op()].
+as_replayed([], _Table, _ColState) ->
+    [];
+as_replayed([Written | Rest], Table, ColState) ->
+    Cols = maps:get(Table, ColState, []),
+    Op =
+        case Written of
+            {add_column, #kura_column{} = C} -> {add_column, referencing(C, ColState)};
+            {drop_column, Name} -> {drop_column, column_name(Name, Cols)};
+            {rename_column, Old, New} -> {rename_column, column_name(Old, Cols), New};
+            {modify_column, Name, Type} -> {modify_column, column_name(Name, Cols), Type};
+            Other -> Other
+        end,
+    [Op | as_replayed(Rest, Table, ColState#{Table => apply_alter_ops([Op], Cols)})].
+
+-spec referencing(#kura_column{}, col_state()) -> #kura_column{}.
+referencing(#kura_column{references = {Table, Col}} = C, ColState) ->
+    C#kura_column{references = {Table, column_name(Col, maps:get(Table, ColState, []))}};
+referencing(C, _ColState) ->
+    C.
+
+replayed_columns(Columns, Table, #{columns := ColState}) when is_list(Columns) ->
+    Cols = maps:get(Table, ColState, []),
+    [column_name(Col, Cols) || Col <- Columns];
+replayed_columns(Columns, _Table, _State) ->
+    Columns.
+
+%% The name `Cols` has for the column `Name` names, or `Name` when it has
+%% none.
+-spec column_name(dynamic(), [#kura_column{}]) -> dynamic().
+column_name(Name, Cols) ->
+    case find_column(Name, Cols) of
+        {ok, Found} -> Found;
+        error -> Name
+    end.
+
+-spec find_column(dynamic(), [#kura_column{}]) -> {ok, name()} | error.
+find_column(Name, Cols) when is_atom(Name); is_binary(Name) ->
+    Text = text(Name),
+    case [N || #kura_column{name = N} <- Cols, text(N) =:= Text] of
+        [Found | _] -> {ok, Found};
+        [] -> error
+    end;
+find_column(_NotAName, _Cols) ->
+    error.
+
+%% The form two names are compared in.
+-spec text(name()) -> binary().
+text(Name) when is_atom(Name) -> atom_to_binary(Name, utf8);
+text(Name) when is_binary(Name) -> Name.
+
+%% The replayed state with each column named as the schemas name it, so the
+%% diff compares one name with another as terms. The desired state is built
+%% from one field list per table and has one name per column already.
+-spec named_as(db_state(), col_state()) -> db_state().
+named_as(#{columns := DbCols} = DbState, Desired) ->
+    DbState#{
+        columns =>
+            #{
+                Table => [
+                    referencing(
+                        C#kura_column{name = named(C#kura_column.name, Table, Desired)}, Desired
+                    )
+                 || C <- Cols
+                ]
+             || Table := Cols <- DbCols
+            },
+        indexes =>
+            #{
+                Table => [
+                    {[named(Col, Table, Desired) || Col <- Cols], Opts}
+                 || {Cols, Opts} <- normalize_indexes(Entries)
+                ]
+             || Table := Entries <- maps:get(indexes, DbState, #{})
+            },
+        fk_names =>
+            #{
+                {Table, named(Col, Table, Desired)} => Name
+             || {Table, Col} := Name <- maps:get(fk_names, DbState, #{})
+            },
+        fk_unowned =>
+            #{
+                {Table, named(Col, Table, Desired)} => true
+             || {Table, Col} := true <- maps:get(fk_unowned, DbState, #{})
+            }
+    }.
+
+-spec named(dynamic(), binary(), col_state()) -> dynamic().
+named(Name, Table, Desired) ->
+    column_name(Name, maps:get(Table, Desired, [])).
+
 %% A unique constraint is an index replay does not record, so a schema that
 %% declares the same unique index sees drift that is not there; one note per
 %% table names them all. A check constraint is nothing the diff compares, so
 %% it would only add a warning to every run.
--spec note_constraints(binary(), [kura_migration:table_constraint()], db_state()) -> db_state().
+-spec note_constraints(binary(), [constraint()], db_state()) -> db_state().
 note_constraints(Table, Constraints, State) ->
     case [[~"UNIQUE (", quoted_columns(Cols), ~")"] || {unique, Cols} <- Constraints] of
         [] ->
@@ -870,21 +994,21 @@ note_constraints(Table, Constraints, State) ->
             State#{unreplayed => maps:get(unreplayed, State, []) ++ [Note]}
     end.
 
--spec quoted_columns([atom()]) -> iodata().
+-spec quoted_columns([name()]) -> iodata().
 quoted_columns(Cols) ->
-    lists:join(~", ", [quote(atom_to_binary(C)) || C <- Cols]).
+    lists:join(~", ", [quote(text(C)) || C <- Cols]).
 
 %% Convert legacy flat map format to structured format
 -spec ensure_structured(map()) -> db_state().
 ensure_structured(#{columns := _} = State) -> State;
 ensure_structured(FlatMap) -> #{columns => FlatMap, indexes => #{}}.
 
--spec index_name(binary(), [atom()]) -> binary().
+-spec index_name(binary(), [name()]) -> binary().
 index_name(Table, Cols) ->
-    ColsBin = lists:join(~"_", [atom_to_binary(C, utf8) || C <- Cols]),
+    ColsBin = lists:join(~"_", [text(C) || C <- Cols]),
     iolist_to_binary([Table, ~"_", ColsBin, ~"_index"]).
 
--spec index_name(binary(), [atom()], map()) -> binary().
+-spec index_name(binary(), [name()], map()) -> binary().
 index_name(Table, Cols, Opts) ->
     case is_named(Opts) of
         true -> maps:get(name, Opts);
@@ -935,7 +1059,7 @@ rename_in_where(Opts, _Old, _New) ->
 
 %% `&` and `\` mean something in a re:replace replacement.
 replacement(Col) ->
-    binary:replace(atom_to_binary(Col), [<<$\\>>, <<$&>>], <<$\\>>, [global, {insert_replaced, 1}]).
+    binary:replace(text(Col), [<<$\\>>, <<$&>>], <<$\\>>, [global, {insert_replaced, 1}]).
 
 index_uses({Cols, Opts}, Col) ->
     lists:member(Col, Cols) orelse
@@ -947,7 +1071,7 @@ index_uses({Cols, Opts}, Col) ->
         end.
 
 column_word(Col) ->
-    <<"(?i)", (word(atom_to_binary(Col)))/binary>>.
+    <<"(?i)", (word(text(Col)))/binary>>.
 
 %% Postgres names an inline REFERENCES constraint after the column and keeps
 %% that name across a rename, so a renamed column's constraint is recorded
@@ -986,9 +1110,14 @@ retarget_references([{rename_column, Old, New} | Rest], Table, ColState) ->
 retarget_references([_Op | Rest], Table, ColState) ->
     retarget_references(Rest, Table, ColState).
 
--spec retarget(#kura_column{}, binary(), atom(), atom()) -> #kura_column{}.
-retarget(#kura_column{references = {Table, Old}} = C, Table, Old, New) ->
-    C#kura_column{references = {Table, New}};
+%% A reference written before its table existed keeps the name it was
+%% written with, so the two are compared as text.
+-spec retarget(#kura_column{}, binary(), name(), name()) -> #kura_column{}.
+retarget(#kura_column{references = {Table, Ref}} = C, Table, Old, New) ->
+    case text(Ref) =:= text(Old) of
+        true -> C#kura_column{references = {Table, New}};
+        false -> C
+    end;
 retarget(C, _Table, _Old, _New) ->
     C.
 
@@ -1109,14 +1238,14 @@ diff_columns(Table, DbCols, DesiredCols, FkMeta) ->
     DesiredNames = maps:keys(DesiredMap),
 
     %% Added columns
-    Added = DesiredNames -- DbNames,
-    AddUp = [{add_column, maps:get(N, DesiredMap)} || N <- lists:sort(Added)],
-    AddDown = [{drop_column, N} || N <- lists:sort(Added)],
+    Added = by_text(DesiredNames -- DbNames),
+    AddUp = [{add_column, maps:get(N, DesiredMap)} || N <- Added],
+    AddDown = [{drop_column, N} || N <- Added],
 
     %% Dropped columns
-    Dropped = DbNames -- DesiredNames,
-    DropUp = [{drop_column, N} || N <- lists:sort(Dropped)],
-    DropDown = [{add_column, maps:get(N, DbMap)} || N <- lists:sort(Dropped)],
+    Dropped = by_text(DbNames -- DesiredNames),
+    DropUp = [{drop_column, N} || N <- Dropped],
+    DropDown = [{add_column, maps:get(N, DbMap)} || N <- Dropped],
 
     %% Changes on existing columns (type, nullable, default)
     Common = DesiredNames -- Added,
@@ -1135,7 +1264,7 @@ diff_columns(Table, DbCols, DesiredCols, FkMeta) ->
                             [{modify_column, Name, DbCol#kura_column.type} | MD]
                         }
                 end,
-            ColBin = atom_to_binary(Name, utf8),
+            ColBin = text(Name),
             %% Nullable changes
             {EU2, ED2} =
                 case nullable_changed(DbCol, DesCol) of
@@ -1194,7 +1323,7 @@ diff_columns(Table, DbCols, DesiredCols, FkMeta) ->
             {MU2, MD2, EU3 ++ FkUp, FkDown ++ ED3}
         end,
         {[], [], [], []},
-        lists:sort(Common)
+        by_text(Common)
     ),
 
     {
@@ -1216,8 +1345,8 @@ diff_columns(Table, DbCols, DesiredCols, FkMeta) ->
 %% whose clauses replay could not all read is left alone while the schema
 %% agrees with what it could.
 fk_ops(Table, Name, DbCol, DesCol, {FkNames, Unowned}) ->
-    DbFk = {DbCol#kura_column.references, DbCol#kura_column.on_delete},
-    DesFk = {DesCol#kura_column.references, DesCol#kura_column.on_delete},
+    DbFk = {referenced(DbCol), DbCol#kura_column.on_delete},
+    DesFk = {referenced(DesCol), DesCol#kura_column.on_delete},
     case DbFk =:= DesFk of
         true ->
             {[], []};
@@ -1229,6 +1358,13 @@ fk_ops(Table, Name, DbCol, DesCol, {FkNames, Unowned}) ->
                 fk_transition(Table, Name, {DesCol, DbName}, {DbCol, DbName})
             }
     end.
+
+%% The referenced table may be one no schema here declares, so its column
+%% has no name to share and is compared as text.
+referenced(#kura_column{references = {Table, Col}}) when is_atom(Col); is_binary(Col) ->
+    {Table, text(Col)};
+referenced(#kura_column{references = Refs}) ->
+    Refs.
 
 %% ON UPDATE can only come from a hand-written migration - no schema can
 %% declare it - so regenerating the constraint from the schema would drop it.
@@ -1258,9 +1394,9 @@ fk_transition(Table, Name, {From, FromName}, {To, ToName}) ->
 
 %% PostgreSQL's own name for the constraint an inline REFERENCES creates, so a
 %% DROP here finds the one create_table/add_column generated.
--spec fk_constraint_name(binary(), atom()) -> binary().
+-spec fk_constraint_name(binary(), name()) -> binary().
 fk_constraint_name(Table, Col) ->
-    iolist_to_binary([Table, ~"_", atom_to_binary(Col, utf8), ~"_fkey"]).
+    iolist_to_binary([Table, ~"_", text(Col), ~"_fkey"]).
 
 drop_fk_sql(Table, Constraint) ->
     iolist_to_binary([
@@ -1277,11 +1413,11 @@ add_fk_sql(Table, Col, Constraint, {RefTable, RefCol}, OnDelete) ->
         ~" ADD CONSTRAINT ",
         quote(Constraint),
         ~" FOREIGN KEY (",
-        quote(atom_to_binary(Col, utf8)),
+        quote(text(Col)),
         ~") REFERENCES ",
         quote(RefTable),
         ~" (",
-        quote(atom_to_binary(RefCol, utf8)),
+        quote(text(RefCol)),
         ~")",
         on_delete_clause(OnDelete)
     ]).
@@ -1354,12 +1490,17 @@ assert_primary_key_kept(Table, DbCols, DesiredCols, PkNames) ->
             error({kura_schema_diff, {primary_key_changed, Table, Col, Joins, Name}})
     end.
 
--spec key_columns([#kura_column{}]) -> [atom()].
+-spec key_columns([#kura_column{}]) -> [name()].
 key_columns(Cols) ->
     [C#kura_column.name || C <- Cols, C#kura_column.primary_key].
 
 col_map(Cols) ->
-    maps:from_list([{C#kura_column.name, C} || C <- Cols]).
+    #{C#kura_column.name => C || C <- Cols}.
+
+%% In the order of their text, which is the order atoms sort in.
+-spec by_text([name()]) -> [name()].
+by_text(Names) ->
+    [Name || {_Text, Name} <- lists:sort([{text(Name), Name} || Name <- Names])].
 
 replay_execute(SQL, State) ->
     Stmt = statement(SQL),
@@ -1392,7 +1533,7 @@ replay_statement(Stmt, State) ->
 
 replay_alter_column(Table, Col, Action, State) ->
     case {existing_column(Table, Col, State), parse_action(Action)} of
-        {{ok, ColAtom}, {ok, Parsed}} -> {ok, update_col(Table, ColAtom, Parsed, State)};
+        {{ok, Column}, {ok, Parsed}} -> {ok, update_col(Table, Column, Parsed, State)};
         _ -> nomatch
     end.
 
@@ -1400,12 +1541,13 @@ replay_fk_add(Stmt, State) ->
     case captures(Stmt, ?ADD_FK_RE, 11) of
         {match, [TQ, TB, NQ, NB, CQ, CB, RTQ, RTB, RCQ, RCB, Tail]} ->
             Table = ident(TQ, TB),
-            case {existing_column(Table, ident(CQ, CB), State), existing_atom(ident(RCQ, RCB))} of
-                {{ok, Col}, {ok, RefCol}} ->
-                    Refs = {ident(RTQ, RTB), RefCol},
+            case existing_column(Table, ident(CQ, CB), State) of
+                {ok, Col} ->
+                    RefTable = ident(RTQ, RTB),
+                    Refs = {RefTable, replayed_column(RefTable, ident(RCQ, RCB), State)},
                     Name = constraint_name(Table, Col, ident(NQ, NB)),
                     {ok, add_fk(Table, Col, Refs, Name, parse_fk_actions(Tail), State)};
-                _ ->
+                error ->
                     nomatch
             end;
         nomatch ->
@@ -1461,11 +1603,11 @@ ident_list(Bin) ->
 more_idents(_Ident, error) -> error;
 more_idents(Ident, Idents) -> [Ident | Idents].
 
--spec existing_columns(binary(), [binary()] | error, db_state()) -> {ok, [atom()]} | error.
+-spec existing_columns(binary(), [binary()] | error, db_state()) -> {ok, [name()]} | error.
 existing_columns(_Table, error, _State) ->
     error;
 existing_columns(Table, Cols, State) ->
-    Found = [Atom || Col <- Cols, {ok, Atom} <- [existing_column(Table, Col, State)]],
+    Found = [Name || Col <- Cols, {ok, Name} <- [existing_column(Table, Col, State)]],
     case length(Found) =:= length(Cols) of
         true -> {ok, Found};
         false -> error
@@ -1493,7 +1635,7 @@ clip(Bin, Max) ->
         _ -> binary:part(Bin, 0, Max)
     end.
 
--spec add_pk(binary(), [atom()], binary(), db_state()) -> db_state().
+-spec add_pk(binary(), [name()], binary(), db_state()) -> db_state().
 add_pk(Table, Key, Name, #{columns := ColState} = State) ->
     PkNames = maps:get(pk_names, State, #{}),
     State1 =
@@ -1534,24 +1676,26 @@ ident(Quoted, _Bare) -> unquote(Quoted).
 unquote(Ident) ->
     binary:replace(Ident, ~"\"\"", ~"\"", [global]).
 
-%% A column that is not already an atom cannot be in the state, so the
-%% statement cannot be about it.
-existing_atom(Bin) ->
-    try
-        {ok, binary_to_existing_atom(Bin)}
-    catch
-        error:badarg -> error
-    end.
-
+%% A statement names a column by its text. It is about a column of the
+%% state when one has that text, under the name the state has for it.
+-spec existing_column(binary(), binary(), db_state()) -> {ok, name()} | error.
 existing_column(Table, Col, #{columns := ColState}) ->
-    case existing_atom(Col) of
-        {ok, Atom} ->
-            case lists:keymember(Atom, #kura_column.name, maps:get(Table, ColState, [])) of
-                true -> {ok, Atom};
-                false -> error
-            end;
+    find_column(Col, maps:get(Table, ColState, [])).
+
+%% A referenced column the state does not have is named by the atom of its
+%% text when there is one, as an operation would name it, and otherwise by
+%% the text.
+-spec replayed_column(binary(), binary(), db_state()) -> name().
+replayed_column(Table, Col, #{columns := ColState}) ->
+    case find_column(Col, maps:get(Table, ColState, [])) of
+        {ok, Name} ->
+            Name;
         error ->
-            error
+            try
+                binary_to_existing_atom(Col)
+            catch
+                error:badarg -> Col
+            end
     end.
 
 constraint_name(Table, Col, <<>>) -> fk_constraint_name(Table, Col);

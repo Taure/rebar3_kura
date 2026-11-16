@@ -603,7 +603,7 @@ field_to_column_preserves_nullable_test() ->
 field_to_column_custom_column_name_test() ->
     Field = #kura_field{name = email, type = string, column = <<"email_address">>},
     Col = kura_schema_diff:field_to_column(Field),
-    ?assertEqual(email_address, Col#kura_column.name),
+    ?assertEqual(~"email_address", Col#kura_column.name),
     ?assertEqual(string, Col#kura_column.type).
 
 field_to_column_undefined_column_uses_field_name_test() ->
