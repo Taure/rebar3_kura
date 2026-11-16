@@ -60,8 +60,8 @@ render_repo_custom_name_test() ->
 
 missing_dep_hint_names_current_kura_and_a_backend_test() ->
     Hint = lists:flatten(io_lib:format(rebar3_kura_setup:missing_dep_hint(), [])),
-    ?assertNotEqual(nomatch, string:find(Hint, "{kura, \"~> 2.28\"}")),
-    ?assertNotEqual(nomatch, string:find(Hint, "{kura_postgres, \"~> 1.1\"}")).
+    ?assertNotEqual(nomatch, string:find(Hint, "{kura, \"~> 2.31\"}")),
+    ?assertNotEqual(nomatch, string:find(Hint, "{kura_postgres, \"~> 1.2\"}")).
 
 render_repo_is_erlfmt_clean_test() ->
     Content = lists:flatten(rebar3_kura_setup:render_repo("my_app_repo", "my_app")),
