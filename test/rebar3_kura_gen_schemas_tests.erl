@@ -23,7 +23,7 @@ schema_source_basic_test() ->
     ?assert(has(Src, <<"-module(myapp_users).">>)),
     ?assert(has(Src, <<"-behaviour(kura_schema).">>)),
     ?assert(has(Src, <<"-export([table/0, fields/0]).">>)),
-    ?assert(has(Src, <<"table() -> <<\"users\">>.">>)),
+    ?assert(has(Src, ~"table() -> ~\"users\".")),
     ?assert(has(Src, <<"name = id">>)),
     ?assert(has(Src, <<"type = string">>)),
     ?assert(has(Src, <<"primary_key = true">>)),

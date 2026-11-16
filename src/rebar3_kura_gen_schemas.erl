@@ -299,13 +299,22 @@ schema_source(App, #{table := Table, fields := Fields} = TableInfo) ->
         end,
         "]).\n\n",
         "table() -> ",
-        io_lib:format("~0tp", [Table]),
+        table_literal(Table),
         ".\n\n",
         "fields() ->\n    [\n",
         lists:join(",\n", [render_field(F) || F <- Fields]),
         "\n    ].\n",
         render_associations(App, Assocs)
     ].
+
+%% A plain identifier is written with the sigil. Any other name is written
+%% as the term it is, which holds whatever bytes it has.
+-spec table_literal(binary()) -> iodata().
+table_literal(Table) ->
+    case rebar3_kura_introspect_pg:valid_ident(Table) of
+        true -> [$~, $", Table, $"];
+        false -> io_lib:format("~0tp", [Table])
+    end.
 
 render_field(#{name := Name, type := Type, primary_key := Pk, nullable := Nullable}) ->
     Parts =
