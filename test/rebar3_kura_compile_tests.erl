@@ -48,6 +48,23 @@ generate_create_table_with_constraints_test() ->
         cleanup_mod(Mod)
     end.
 
+derive_description_names_only_a_plain_table_test() ->
+    Cols = [#kura_column{name = a, type = integer}],
+    [
+        ?assertEqual("update_schema", rebar3_kura_compile:derive_description(Ops))
+     || Table <- [~"../../x", ~"x).\n-compile(export_all", ~"User Table", ~"", ~"t\n"],
+        Ops <- [
+            [{create_table, Table, Cols}],
+            [{create_table, Table, Cols, []}],
+            [{alter_table, Table, [{drop_column, a}]}],
+            [{drop_table, Table}]
+        ]
+    ],
+    ?assertEqual(
+        "alter_t", rebar3_kura_compile:derive_description([{alter_table, ~"t", [{drop_column, a}]}])
+    ),
+    ?assertEqual("drop_t", rebar3_kura_compile:derive_description([{drop_table, ~"t"}])).
+
 derive_description_names_a_created_table_test() ->
     Cols = [#kura_column{name = a, type = integer}],
     ?assertEqual(

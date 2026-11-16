@@ -270,29 +270,38 @@ make_timestamp(MigDir) ->
     end.
 
 derive_description(Ops) ->
-    case Ops of
-        [{create_table, Table, _} | Rest] ->
-            created(Table, Rest);
-        [{create_table, Table, _, _} | Rest] ->
-            created(Table, Rest);
-        [{alter_table, Table, _}] ->
-            "alter_" ++ binary_to_list(Table);
-        [{alter_table, Table, _} | Rest] when Rest =/= [] ->
-            case lists:all(fun(Op) -> is_index_op(Op) orelse is_execute_op(Op) end, Rest) of
-                true -> "alter_" ++ binary_to_list(Table);
+    case described(Ops) of
+        {Verb, Table} ->
+            case rebar3_kura_introspect_pg:valid_ident(Table) of
+                true -> Verb ++ binary_to_list(Table);
                 false -> "update_schema"
             end;
-        [{drop_table, Table}] ->
-            "drop_" ++ binary_to_list(Table);
-        _ ->
+        none ->
             "update_schema"
     end.
 
--spec created(binary(), [kura_schema_diff:operation()]) -> string().
+%% The description becomes part of the module name and the file name of the
+%% migration, so a table is only named in it when it is a plain identifier.
+-spec described([kura_schema_diff:operation()]) -> {string(), binary()} | none.
+described([{create_table, Table, _} | Rest]) ->
+    created(Table, Rest);
+described([{create_table, Table, _, _} | Rest]) ->
+    created(Table, Rest);
+described([{alter_table, Table, _} | Rest]) ->
+    case lists:all(fun(Op) -> is_index_op(Op) orelse is_execute_op(Op) end, Rest) of
+        true -> {"alter_", Table};
+        false -> none
+    end;
+described([{drop_table, Table}]) ->
+    {"drop_", Table};
+described(_Ops) ->
+    none.
+
+-spec created(binary(), [kura_schema_diff:operation()]) -> {string(), binary()} | none.
 created(Table, Rest) ->
     case lists:all(fun is_index_op/1, Rest) of
-        true -> "create_" ++ binary_to_list(Table);
-        false -> "update_schema"
+        true -> {"create_", Table};
+        false -> none
     end.
 
 is_index_op({create_index, _, _, _}) -> true;
@@ -464,9 +473,9 @@ render_alter_op({modify_column, Name, Type}) ->
 render_alter_op({rename_column, Old, New}) ->
     io_lib:format("{rename_column, ~s, ~s}", [name(Old), name(New)]).
 
-%% The kura this plugin is built against writes DDL from atom column names
-%% only, so a column named by a binary is written as the atom of that text,
-%% always quoted. The atom is made when the migration is loaded, not here.
+%% A column named by a binary is written as the atom of that text, always
+%% quoted, so a migration reads the same whatever the name holds. The atom
+%% is made when the migration is loaded, not here.
 -spec name(term()) -> iodata().
 name(Name) when is_binary(Name) ->
     case unicode:characters_to_list(Name) of
